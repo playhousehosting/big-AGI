@@ -224,6 +224,7 @@ export namespace AixWire_Content {
   export const SystemInstruction_schema = z.object({
     parts: z.array(z.discriminatedUnion('pt', [
       AixWire_Parts.TextPart_schema,
+      AixWire_Parts.DocPart_schema, // Jan 10, 2025: added support for Docs in AIX system
       AixWire_Parts.MetaCacheControl_schema,
     ])),
   });
@@ -376,6 +377,9 @@ export namespace AixWire_API {
     id: z.string(),
     temperature: z.number().min(0).max(2).optional(),
     maxTokens: z.number().min(1).optional(),
+    topP: z.number().min(0).max(1).optional(),
+    vndOaiReasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
+    vndOaiRestoreMarkdown: z.boolean().optional(),
   });
 
   /// Context
@@ -431,7 +435,7 @@ export namespace AixWire_API_ChatContentGenerate {
   /// Request
 
   export const Request_schema = z.object({
-    systemMessage: AixWire_Content.SystemInstruction_schema.optional(),
+    systemMessage: AixWire_Content.SystemInstruction_schema.nullable(),
     chatSequence: z.array(AixWire_Content.ChatMessage_schema),
     tools: z.array(AixWire_Tooling.Tool_schema).optional(),
     toolsPolicy: AixWire_Tooling.ToolsPolicy_schema.optional(),

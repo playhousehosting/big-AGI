@@ -15,15 +15,16 @@ import { useChatLLMDropdown } from '../chat/components/layout-bar/useLLMDropdown
 
 import { SystemPurposeId, SystemPurposes } from '../../data';
 import { elevenLabsSpeakText } from '~/modules/elevenlabs/elevenlabs.client';
-import { AixChatGenerateContent_DMessage, aixChatGenerateContent_DMessage_FromHistory } from '~/modules/aix/client/aix.client';
+import { AixChatGenerateContent_DMessage, aixChatGenerateContent_DMessage_FromConversation } from '~/modules/aix/client/aix.client';
 import { useElevenLabsVoiceDropdown } from '~/modules/elevenlabs/useElevenLabsVoiceDropdown';
 
 import type { OptimaBarControlMethods } from '~/common/layout/optima/bar/OptimaBarDropdown';
 import { AudioPlayer } from '~/common/util/audio/AudioPlayer';
 import { Link } from '~/common/components/Link';
+import { OptimaPanelGroup } from '~/common/layout/optima/panel/OptimaPanelGroup';
 import { OptimaToolbarIn } from '~/common/layout/optima/portals/OptimaPortalsIn';
 import { SpeechResult, useSpeechRecognition } from '~/common/components/speechrecognition/useSpeechRecognition';
-import { conversationTitle } from '~/common/stores/chat/chat.conversation';
+import { conversationTitle, remapMessagesSysToUsr } from '~/common/stores/chat/chat.conversation';
 import { createDMessageFromFragments, createDMessageTextContent, DMessage, messageFragmentsReduceText } from '~/common/stores/chat/chat.message';
 import { createErrorContentFragment } from '~/common/stores/chat/chat.fragments';
 import { launchAppChat, navigateToIndex } from '~/common/app.routes';
@@ -55,7 +56,7 @@ function CallMenuItems(props: {
 
   const handleChangeVoiceToggle = () => props.setOverride(!props.override);
 
-  return <>
+  return <OptimaPanelGroup title='Call'>
 
     <MenuItem onClick={handlePushToTalkToggle}>
       <ListItemDecorator>{props.pushToTalk ? <MicNoneIcon /> : <MicIcon />}</ListItemDecorator>
@@ -85,7 +86,7 @@ function CallMenuItems(props: {
       Voice Calls Feedback
     </MenuItem>
 
-  </>;
+  </OptimaPanelGroup>;
 }
 
 
@@ -229,14 +230,12 @@ export function Telephone(props: {
 
 
     // Call Message Generation Prompt
+    const callSystemInstruction = createDMessageTextContent('system', 'You are having a phone call. Your response style is brief and to the point, and according to your personality, defined below.');
+    const reMessagesRemapSysToUsr = remapMessagesSysToUsr(reMessages);
     const callGenerationInputHistory: DMessage[] = [
-      // Call system prompt
-      createDMessageTextContent('system', 'You are having a phone call. Your response style is brief and to the point, and according to your personality, defined below.'),
-      // Chat messages, including the system prompt
-      ...((reMessages && reMessages?.length > 0)
-          ? reMessages.map(_m => _m.role === 'system' ? { ..._m, role: 'user' as const } : _m) // cast system chat messages to the user role
-          : [createDMessageTextContent('user', personaSystemMessage)]
-      ),
+      // Chat messages, including the system prompt which is casted to a user message
+      // TODO: when upgrading to dynamic personas, we need to inject the persona message instead - not rely on reMessages, as messages[0] !== 'system'
+      ...(reMessagesRemapSysToUsr ? reMessagesRemapSysToUsr : [createDMessageTextContent('user', personaSystemMessage)]),
       // Call system prompt 2, to indicate the call has started
       createDMessageTextContent('user', '**You are now on the phone call related to the chat above**.\nRespect your personality and answer with short, friendly and accurate thoughtful brief lines.'),
       // Call history
@@ -249,13 +248,14 @@ export function Telephone(props: {
     let finalText = '';
     setPersonaTextInterim('💭...');
 
-    aixChatGenerateContent_DMessage_FromHistory(
+    aixChatGenerateContent_DMessage_FromConversation(
       chatLLMId,
+      callSystemInstruction,
       callGenerationInputHistory,
       'call',
       callMessages[0].id,
       { abortSignal: responseAbortController.current.signal },
-      (update: AixChatGenerateContent_DMessage, isDone: boolean) => {
+      (update: AixChatGenerateContent_DMessage, _isDone: boolean) => {
         const updatedText = messageFragmentsReduceText(update.fragments).trim();
         if (updatedText)
           setPersonaTextInterim(finalText = updatedText);

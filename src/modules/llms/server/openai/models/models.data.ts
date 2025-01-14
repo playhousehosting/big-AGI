@@ -6,50 +6,12 @@ import { _knownOpenAIChatModels } from './openai.models';
 import { wireGroqModelsListOutputSchema } from '../groq.wiretypes';
 import { wireOpenPipeModelOutputSchema } from '../openpipe.wiretypes';
 import { wireOpenrouterModelsListOutputSchema } from '../openrouter.wiretypes';
-import { wireTogetherAIListOutputSchema } from '../togetherai.wiretypes';
 
 
 export function azureModelToModelDescription(azureDeploymentRef: string, openAIModelIdBase: string, modelCreated: number, modelUpdated?: number): ModelDescriptionSchema {
   // if the deployment name mataches an OpenAI model prefix, use that
   const known = _knownOpenAIChatModels.find(base => azureDeploymentRef == base.idPrefix);
   return fromManualMapping(_knownOpenAIChatModels, known ? azureDeploymentRef : openAIModelIdBase, modelCreated, modelUpdated, undefined, true);
-}
-
-
-// [Deepseek AI]
-const _knownDeepseekChatModels: ManualMappings = [
-  // [Models and Pricing](https://platform.deepseek.com/api-docs/pricing)
-  // [List Models](https://platform.deepseek.com/api-docs/api/list-models)
-  {
-    idPrefix: 'deepseek-chat',
-    label: 'Deepseek Chat V2',
-    description: 'Good at general tasks, 128K context length',
-    contextWindow: 128000,
-    interfaces: [LLM_IF_OAI_Chat],
-    maxCompletionTokens: 4096,
-    chatPrice: { input: 0.14, output: 0.28 },
-  },
-  {
-    idPrefix: 'deepseek-coder',
-    label: 'Deepseek Coder V2',
-    description: 'Good at coding and math tasks, 128K context length',
-    contextWindow: 128000,
-    interfaces: [LLM_IF_OAI_Chat],
-    maxCompletionTokens: 4096,
-    chatPrice: { input: 0.14, output: 0.28 },
-  },
-];
-
-export function deepseekModelToModelDescription(deepseekModelId: string): ModelDescriptionSchema {
-  return fromManualMapping(_knownDeepseekChatModels, deepseekModelId, undefined, undefined, {
-    idPrefix: deepseekModelId,
-    label: deepseekModelId.replaceAll(/[_-]/g, ' '),
-    description: 'New Deepseek Model',
-    contextWindow: 128000,
-    maxCompletionTokens: 4096,
-    interfaces: [LLM_IF_OAI_Chat], // assume..
-    hidden: true,
-  });
 }
 
 
@@ -375,78 +337,6 @@ export function openRouterModelToModelDescription(wireModel: object): ModelDescr
 }
 
 
-// [Together AI]
-
-const _knownTogetherAIChatModels: ManualMappings = [
-  {
-    idPrefix: 'NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO',
-    label: 'Nous Hermes 2 - Mixtral 8x7B-DPO',
-    description: 'Nous Hermes 2 Mixtral 7bx8 DPO is the new flagship Nous Research model trained over the Mixtral 7bx8 MoE LLM. The model was trained on over 1,000,000 entries of primarily GPT-4 generated data, as well as other high quality data from open datasets across the AI landscape, achieving state of the art performance on a variety of tasks.',
-    contextWindow: 32768,
-    interfaces: [LLM_IF_OAI_Chat],
-  },
-  {
-    idPrefix: 'NousResearch/Nous-Hermes-2-Mixtral-8x7B-SFT',
-    label: 'Nous Hermes 2 - Mixtral 8x7B-SFT',
-    description: 'Nous Hermes 2 Mixtral 7bx8 SFT is the new flagship Nous Research model trained over the Mixtral 7bx8 MoE LLM. The model was trained on over 1,000,000 entries of primarily GPT-4 generated data, as well as other high quality data from open datasets across the AI landscape, achieving state of the art performance on a variety of tasks.',
-    contextWindow: 32768,
-    interfaces: [LLM_IF_OAI_Chat],
-  },
-  {
-    idPrefix: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
-    label: 'Mixtral-8x7B Instruct',
-    description: 'The Mixtral-8x7B Large Language Model (LLM) is a pretrained generative Sparse Mixture of Experts.',
-    contextWindow: 32768,
-    interfaces: [LLM_IF_OAI_Chat],
-  },
-  {
-    idPrefix: 'mistralai/Mistral-7B-Instruct-v0.2',
-    label: 'Mistral (7B) Instruct v0.2',
-    description: 'The Mistral-7B-Instruct-v0.2 Large Language Model (LLM) is an improved instruct fine-tuned version of Mistral-7B-Instruct-v0.1.',
-    contextWindow: 32768,
-    interfaces: [LLM_IF_OAI_Chat],
-  },
-  {
-    idPrefix: 'NousResearch/Nous-Hermes-2-Yi-34B',
-    label: 'Nous Hermes-2 Yi (34B)',
-    description: 'Nous Hermes 2 - Yi-34B is a state of the art Yi Fine-tune',
-    contextWindow: 4097,
-    interfaces: [LLM_IF_OAI_Chat],
-  },
-] as const;
-
-export function togetherAIModelsToModelDescriptions(wireModels: unknown): ModelDescriptionSchema[] {
-
-  function togetherAIModelToModelDescription(model: { id: string, created: number }) {
-    return fromManualMapping(_knownTogetherAIChatModels, model.id, model.created, undefined, {
-      idPrefix: model.id,
-      label: model.id.replaceAll('/', ' · ').replaceAll(/[_-]/g, ' '),
-      description: 'New Togehter AI Model',
-      contextWindow: null, // unknown
-      interfaces: [LLM_IF_OAI_Chat], // assume..
-      hidden: true,
-    });
-  }
-
-  function togetherAIModelsSort(a: ModelDescriptionSchema, b: ModelDescriptionSchema): number {
-    if (a.hidden && !b.hidden)
-      return 1;
-    if (!a.hidden && b.hidden)
-      return -1;
-    if (a.created !== b.created)
-      return (b.created || 0) - (a.created || 0);
-    return a.id.localeCompare(b.id);
-  }
-
-  return wireTogetherAIListOutputSchema.parse(wireModels)
-    .map(togetherAIModelToModelDescription)
-    .sort(togetherAIModelsSort);
-}
-
-
-// Perplexity
-
-
 // Groq - https://console.groq.com/docs/models
 
 const _knownGroqModels: ManualMappings = [
@@ -619,6 +509,8 @@ export function fromManualMapping(mappings: ManualMappings, id: string, created?
     md.maxCompletionTokens = known.maxCompletionTokens;
   if (known.trainingDataCutoff)
     md.trainingDataCutoff = known.trainingDataCutoff;
+  if (known.parameterSpecs)
+    md.parameterSpecs = known.parameterSpecs;
   if (known.benchmark)
     md.benchmark = known.benchmark;
   if (known.chatPrice)
