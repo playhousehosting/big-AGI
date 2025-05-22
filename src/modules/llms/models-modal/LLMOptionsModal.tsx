@@ -3,6 +3,8 @@ import TimeAgo from 'react-timeago';
 
 import { Box, Button, ButtonGroup, Divider, FormControl, Input, Switch, Tooltip, Typography } from '@mui/joy';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import StarBorderIcon from '@mui/icons-material/StarBorder';
+import StarIcon from '@mui/icons-material/Star';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
 
@@ -79,6 +81,8 @@ export function LLMOptionsModal(props: { id: DLLMId, onClose: () => void }) {
 
   const handleLlmVisibilityToggle = () => updateLLM(llm.id, { hidden: !llm.hidden });
 
+  const handleLlmStarredToggle = () => updateLLM(llm.id, { userStarred: !llm.userStarred });
+
   const handleLlmDelete = () => {
     removeLLM(llm.id);
     props.onClose();
@@ -125,6 +129,16 @@ export function LLMOptionsModal(props: { id: DLLMId, onClose: () => void }) {
       </FormControl>
 
       <FormControl orientation='horizontal' sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
+        <FormLabelStart title='Starred' sx={{ minWidth: 80 }} />
+        <Tooltip title={llm.userStarred ? 'Unstar this model' : 'Star this model for quick access'}>
+          <Switch checked={!!llm.userStarred} onChange={handleLlmStarredToggle}
+                  endDecorator={llm.userStarred ? <StarIcon sx={{ color: '#fad857' }} /> : <StarBorderIcon />}
+                  slotProps={{ endDecorator: { sx: { minWidth: 26 } } }}
+          />
+        </Tooltip>
+      </FormControl>
+
+      <FormControl orientation='horizontal' sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
         <FormLabelStart title='Visible' sx={{ minWidth: 80 }} />
         <Tooltip title={!llm.hidden ? 'Show this model in the list of Chat models' : 'Hide this model from the list of Chat models'}>
           <Switch checked={!llm.hidden} onChange={handleLlmVisibilityToggle}
@@ -151,8 +165,8 @@ export function LLMOptionsModal(props: { id: DLLMId, onClose: () => void }) {
             {!!llm.pricing?.chat && prettyPricingComponent(llm.pricing.chat)}
             {/*{!!llm.benchmark && <>benchmark: <b>{llm.benchmark.cbaElo?.toLocaleString() || '(unk) '}</b> CBA Elo<br /></>}*/}
             {llm.parameterSpecs?.length > 0 && <>options: {llm.parameterSpecs.map(ps => ps.paramId).join(', ')}<br /></>}
-            {Object.keys(llm.initialParameters || {}).length > 0 && <>initial parameters: {JSON.stringify(llm.initialParameters)}<br /></>}
-            {Object.keys(llm.userParameters || {}).length > 0 && <>user parameters: {JSON.stringify(llm.userParameters)}<br /></>}
+            {Object.keys(llm.initialParameters || {}).length > 0 && <>initial parameters: {JSON.stringify(llm.initialParameters, null, 2)}<br /></>}
+            {Object.keys(llm.userParameters || {}).length > 0 && <>user parameters: {JSON.stringify(llm.userParameters, null, 2)}<br /></>}
           </Typography>
         </Box>}
       </FormControl>

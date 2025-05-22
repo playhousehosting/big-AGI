@@ -74,16 +74,23 @@ const ModelParameterSpec_schema = z.object({
    */
   paramId: z.enum([
     'llmTopP',
+    'llmForceNoStream',
+    'llmVndAntThinkingBudget',
     'llmVndGeminiShowThoughts',
+    'llmVndGeminiThinkingBudget',
     'llmVndOaiReasoningEffort',
     'llmVndOaiRestoreMarkdown',
+    'llmVndOaiWebSearchContext',
+    'llmVndOaiWebSearchGeolocation',
   ]),
   required: z.boolean().optional(),
   hidden: z.boolean().optional(),
+  initialValue: z.number().or(z.string()).nullable().optional(),
 });
 
 export const ModelDescription_schema = z.object({
   id: z.string(),
+  idVariant: z.string().optional(),
   label: z.string(),
   created: z.number().optional(),
   updated: z.number().optional(),
