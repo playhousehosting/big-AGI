@@ -5,6 +5,8 @@ import { IssueSymbols } from '../ChatGenerateTransmitter';
 
 import { GeminiWire_API_Generate_Content, GeminiWire_Safety } from '../../wiretypes/gemini.wiretypes';
 
+import { geminiConvertPCM2WAV } from './gemini.audioutils';
+
 
 // configuration
 const ENABLE_RECITATIONS_AS_CITATIONS = false;
@@ -87,15 +89,44 @@ export function createGeminiGenerateContentResponseParser(requestedModelName: st
           // <- InlineDataPart
           case 'inlineData' in mPart:
             // [Gemini, 2025-03-14] Experimental Image generation: Response
-            if (mPart.inlineData.mimeType.startsWith('image/'))
-              pt.appendImageInline(mPart.inlineData.mimeType, mPart.inlineData.data, 'Gemini Generated Image', 'Gemini', '');
-            else
+            if (mPart.inlineData.mimeType.startsWith('image/')) {
+              pt.appendImageInline(
+                mPart.inlineData.mimeType,
+                mPart.inlineData.data,
+                'Gemini Generated Image',
+                'Gemini',
+                '',
+              );
+            } else if (mPart.inlineData.mimeType.startsWith('audio/')) {
+              try {
+                // Convert the API response from PCM to WAV: {
+                //   "mimeType": "audio/L16;codec=pcm;rate=24000",
+                //   "data": "7P/z/wQACg...==" (57,024 bytes)
+                // }
+                const convertedAudio = geminiConvertPCM2WAV(mPart.inlineData.mimeType, mPart.inlineData.data);
+                pt.appendAudioInline(
+                  convertedAudio.mimeType,
+                  convertedAudio.base64Data,
+                  'Gemini Generated Audio',
+                  'Gemini',
+                  convertedAudio.durationMs,
+                );
+              } catch (error) {
+                console.warn('[Gemini] Failed to convert audio:', error);
+                pt.setDialectTerminatingIssue(`Failed to process audio: ${error}`, null);
+              }
+            } else
               pt.setDialectTerminatingIssue(`Unsupported inline data type: ${mPart.inlineData.mimeType}`, null);
             break;
 
           // <- FunctionCallPart
           case 'functionCall' in mPart:
-            pt.startFunctionCallInvocation(null, mPart.functionCall.name, 'json_object', mPart.functionCall.args ?? null);
+            let { id: fcId, name: fcName, args: fcArgs } = mPart.functionCall;
+            // Validate the function call arguments - we expect a JSON object, not just any JSON value
+            if (!fcArgs || typeof fcArgs !== 'object')
+              console.warn(`[Gemini] Invalid function call arguments: ${JSON.stringify(fcArgs)} for ${fcName}`);
+            else
+              pt.startFunctionCallInvocation(fcId ?? null, fcName, 'json_object', fcArgs);
             pt.endMessagePart();
             break;
 
@@ -137,7 +168,7 @@ export function createGeminiGenerateContentResponseParser(requestedModelName: st
       if (ENABLE_RECITATIONS_AS_CITATIONS && candidate0.citationMetadata?.citationSources?.length) {
         for (let { startIndex, endIndex, uri /*, license*/ } of candidate0.citationMetadata.citationSources) {
           // TODO: have a particle/part flag to state the purpose of a citation? (e.g. 'recitation' is weaker than 'grounding')
-          pt.appendUrlCitation('', uri || '', undefined, startIndex, endIndex, undefined);
+          pt.appendUrlCitation('', uri || '', undefined, startIndex, endIndex, undefined, undefined);
         }
       }
 
@@ -150,13 +181,28 @@ export function createGeminiGenerateContentResponseParser(requestedModelName: st
          * - follow up Google Search queries (.webSearchQueries)
          * - include the 'renderedContent' from .searchEntryPoint
          */
-        for (const { web } of candidate0.groundingMetadata.groundingChunks) {
-          pt.appendUrlCitation(web.title, web.uri, ++groundingIndexNumber, undefined, undefined, undefined);
+        for (const { web } of candidate0.groundingMetadata.groundingChunks)
+          pt.appendUrlCitation(web.title, web.uri, ++groundingIndexNumber, undefined, undefined, undefined, undefined);
+      }
+
+      // -> Candidates[0] -> URL Context Metadata
+      if (candidate0.urlContextMetadata?.urlMetadata?.length) {
+        for (const urlMeta of candidate0.urlContextMetadata.urlMetadata) {
+          // Only add URLs that were successfully retrieved
+          if (urlMeta.urlRetrievalStatus === 'URL_RETRIEVAL_STATUS_SUCCESS')
+            pt.appendUrlCitation('', urlMeta.retrievedUrl, ++groundingIndexNumber, undefined, undefined, undefined, undefined);
+          else if (urlMeta.urlRetrievalStatus !== 'URL_RETRIEVAL_STATUS_UNSPECIFIED')
+            console.warn(`[Gemini] URL retrieval ${urlMeta.urlRetrievalStatus}: ${urlMeta.retrievedUrl}`); // log for debugging
         }
       }
 
       // -> Candidates[0] -> Token Stop Reason
       if (candidate0.finishReason) {
+        // Helper to append finishMessage if available
+        // NOTE: unused for now, hasn't been tested
+        // const withFinishMessage = (baseMessage: string) =>
+        //   candidate0.finishMessage ? `${baseMessage}: ${candidate0.finishMessage}` : baseMessage;
+
         switch (candidate0.finishReason) {
           case 'STOP':
             // this is expected for every fragment up to the end, when it may switch to one of the reasons below in the last packet
@@ -165,7 +211,7 @@ export function createGeminiGenerateContentResponseParser(requestedModelName: st
 
           case 'MAX_TOKENS':
             pt.setTokenStopReason('out-of-tokens');
-            // NOTE: we call setEnded instread of setDialectTerminatingIssue, because we don't want an extra message appended,
+            // NOTE: we call setEnded instead of setDialectTerminatingIssue, because we don't want an extra message appended,
             // as we know that 'out-of-tokens' will likely append a brick wall (simple/universal enough).
             return pt.setEnded('issue-dialect');
 
@@ -178,35 +224,62 @@ export function createGeminiGenerateContentResponseParser(requestedModelName: st
             return pt.setDialectTerminatingIssue(`Generation stopped due to RECITATION`, IssueSymbols.Recitation);
 
           case 'LANGUAGE':
-            pt.setTokenStopReason('filter-content');
-            return pt.setDialectTerminatingIssue(`Generation stopped due to LANGUAGE`, IssueSymbols.Language);
+            pt.setTokenStopReason('filter-refusal');
+            return pt.setDialectTerminatingIssue(`Generation stopped due to unsupported LANGUAGE`, IssueSymbols.Language);
 
           case 'OTHER':
-            pt.setTokenStopReason('filter-content');
+            pt.setTokenStopReason('cg-issue');
             return pt.setDialectTerminatingIssue(`Generation stopped due to 'OTHER' (unknown reason)`, null);
 
-          case 'BLOCKLIST':
+          case 'BLOCKLIST': // Token generation stopped because the content contains forbidden terms
             pt.setTokenStopReason('filter-content');
-            return pt.setDialectTerminatingIssue(`Generation stopped due the content containing forbidden terms`, null);
+            return pt.setDialectTerminatingIssue(`Generation stopped: content contains forbidden terms`, null);
 
-          case 'PROHIBITED_CONTENT':
+          case 'PROHIBITED_CONTENT': // Token generation stopped for potentially containing prohibited content
             pt.setTokenStopReason('filter-content');
-            return pt.setDialectTerminatingIssue(`Generation stopped due to potentially containing prohibited content`, null);
+            return pt.setDialectTerminatingIssue(`Generation stopped: potentially prohibited content`, null);
 
-          case 'SPII':
+          case 'SPII': // Token generation stopped because the content potentially contains Sensitive Personally Identifiable Information
             pt.setTokenStopReason('filter-content');
-            return pt.setDialectTerminatingIssue(`Generation stopped due to potentially containing Sensitive Personally Identifiable Information (SPII)`, null);
+            return pt.setDialectTerminatingIssue(`Generation stopped: potentially contains Sensitive PII (SPII)`, null);
 
-          case 'MALFORMED_FUNCTION_CALL':
+          case 'MALFORMED_FUNCTION_CALL': // The function call generated by the model is invalid
             pt.setTokenStopReason('cg-issue');
-            return pt.setDialectTerminatingIssue(`Generation stopped due to the function call generated by the model being invalid`, null);
+            return pt.setDialectTerminatingIssue(`Generation stopped: invalid function call generated by model`, null);
 
-          case 'IMAGE_SAFETY':
+          case 'IMAGE_SAFETY': // Token generation stopped because generated images contain safety violations
             pt.setTokenStopReason('filter-content');
-            return pt.setDialectTerminatingIssue(`Generation stopped due the generated images contain safety violations`, null);
+            return pt.setDialectTerminatingIssue(`Image generation stopped: safety violations`, null);
 
+          case 'IMAGE_PROHIBITED_CONTENT': // Image generation stopped because generated images have prohibited content
+            pt.setTokenStopReason('filter-content');
+            return pt.setDialectTerminatingIssue(`Image generation stopped: prohibited content`, null);
+
+          case 'IMAGE_RECITATION': // Image generation stopped due to recitation
+            pt.setTokenStopReason('filter-recitation');
+            return pt.setDialectTerminatingIssue(`Image generation stopped: recitation detected`, IssueSymbols.Recitation);
+
+          case 'IMAGE_OTHER': // Image generation stopped because of other miscellaneous issue
+            pt.setTokenStopReason('cg-issue');
+            return pt.setDialectTerminatingIssue(`Image generation stopped: miscellaneous issue`, null);
+
+          case 'NO_IMAGE': // The model was expected to generate an image, but none was generated
+            pt.setTokenStopReason('cg-issue');
+            return pt.setDialectTerminatingIssue(`Image generation failed: no image generated`, null);
+
+          case 'UNEXPECTED_TOOL_CALL': // Model generated a tool call but no tools were enabled in the request
+            pt.setTokenStopReason('cg-issue');
+            return pt.setDialectTerminatingIssue(`Generation stopped: tool call made but no tools enabled`, null);
+
+          case 'TOO_MANY_TOOL_CALLS': // Model called too many tools consecutively, execution limit exceeded
+            pt.setTokenStopReason('cg-issue');
+            return pt.setDialectTerminatingIssue(`Generation stopped: too many consecutive tool calls`, null);
+
+          // case 'FINISH_REASON_UNSPECIFIED': // this shall be never received
           default:
-            throw new Error(`unexpected empty generation (finish reason: ${candidate0?.finishReason})`);
+            // Exhaustiveness check - if we get here, Gemini added a new finishReason
+            pt.setTokenStopReason('cg-issue');
+            return pt.setDialectTerminatingIssue(`unexpected Gemini finish reason: ${candidate0?.finishReason})`, null);
         }
       }
     } /* end of .candidates */
@@ -217,8 +290,19 @@ export function createGeminiGenerateContentResponseParser(requestedModelName: st
         TIn: generationChunk.usageMetadata.promptTokenCount,
         TOut: generationChunk.usageMetadata.candidatesTokenCount,
       };
-      if (generationChunk.usageMetadata.thoughtsTokenCount)
+
+      // Add reasoning tokens if available
+      if (generationChunk.usageMetadata.thoughtsTokenCount) {
         metricsUpdate.TOutR = generationChunk.usageMetadata.thoughtsTokenCount;
+        metricsUpdate.TOut = (metricsUpdate.TOut ?? 0) + metricsUpdate.TOutR; // in gemini candidatesTokenCount does not include reasoning tokens
+      }
+
+      // Subtract auto-cached (read) input tokens
+      if (generationChunk.usageMetadata.cachedContentTokenCount) {
+        metricsUpdate.TCacheRead = generationChunk.usageMetadata.cachedContentTokenCount;
+        if ((metricsUpdate.TIn ?? 0) > metricsUpdate.TCacheRead)
+          metricsUpdate.TIn = (metricsUpdate.TIn ?? 0) - metricsUpdate.TCacheRead;
+      }
 
       if (isStreaming && timeToFirstEvent !== undefined)
         metricsUpdate.dtStart = timeToFirstEvent;

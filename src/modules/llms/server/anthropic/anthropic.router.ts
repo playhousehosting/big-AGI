@@ -1,15 +1,15 @@
-import { z } from 'zod';
+import * as z from 'zod/v4';
 
 import { createTRPCRouter, publicProcedure } from '~/server/trpc/trpc.server';
 import { env } from '~/server/env';
 import { fetchJsonOrTRPCThrow } from '~/server/trpc/trpc.router.fetchers';
 
 import { LLM_IF_ANT_PromptCaching, LLM_IF_OAI_Chat, LLM_IF_OAI_Fn, LLM_IF_OAI_Vision } from '~/common/stores/llms/llms.types';
-import { fixupHost } from '~/common/util/urlUtils';
 
 import { ListModelsResponse_schema, ModelDescriptionSchema } from '../llm.server.types';
 
 import { hardcodedAnthropicModels, hardcodedAnthropicVariants } from './anthropic.models';
+import { fixupHost } from '~/modules/llms/server/openai/openai.router';
 
 
 // configuration and defaults
@@ -41,6 +41,14 @@ const DEFAULT_ANTHROPIC_BETA_FEATURES: string[] = [
    *  - message_start.message.usage.cache_read_input_tokens: number
    */
   'prompt-caching-2024-07-31',
+
+  /**
+   * Enables model_context_window_exceeded stop reason for models earlier than Sonnet 4.5
+   * (Sonnet 4.5+ have this by default). This allows requesting max tokens without calculating
+   * input size, and the API will return as much as possible within the context window.
+   * https://docs.claude.com/en/api/handling-stop-reasons#model-context-window-exceeded
+   */
+  // 'model-context-window-exceeded-2025-08-26',
 
   // now default
   // 'messages-2023-12-15'
@@ -180,15 +188,15 @@ export const llmAnthropicRouter = createTRPCRouter({
           if (!hardcodedModel.created && model.created_at)
             hardcodedModel.created = roundTime(model.created_at);
 
-          // add the base model
-          acc.push(hardcodedModel);
-
-          // add a thinking variant, if defined
+          // add FIRST a thinking variant, if defined
           if (hardcodedAnthropicVariants[model.id])
             acc.push({
               ...hardcodedModel,
               ...hardcodedAnthropicVariants[model.id],
             });
+
+          // add the base model
+          acc.push(hardcodedModel);
 
         } else {
 

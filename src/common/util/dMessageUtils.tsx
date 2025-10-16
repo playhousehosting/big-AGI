@@ -11,7 +11,7 @@ import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined
 
 import { SystemPurposeId, SystemPurposes } from '../../data';
 
-import { findModelVendor } from '~/modules/llms/vendors/vendors.registry';
+import { llmsGetVendorIcon } from '~/modules/llms/components/LLMVendorIcon';
 
 import type { MetricsChatGenerateCost_Md } from '~/common/stores/metrics/metrics.chatgenerate';
 import type { DMessage, DMessageGenerator, DMessageRole } from '~/common/stores/chat/chat.message';
@@ -74,7 +74,8 @@ const tooltipMetricsGridSx: SxProps = {
   // grid of 2 columns, the first fits the labels, the other expends with the values
   display: 'grid',
   gridTemplateColumns: 'auto 1fr',
-  gap: 0.5,
+  columnGap: 1,
+  rowGap: 0.5,
 };
 
 
@@ -246,7 +247,7 @@ export function useMessageAvatarLabel(
     // aix generator: details galore
     const modelId = generator.aix?.mId ?? null;
     const vendorId = generator.aix?.vId ?? null;
-    const VendorIcon = (vendorId && complexity !== 'minimal') ? findModelVendor(vendorId)?.Icon : null;
+    const VendorIcon = (vendorId && complexity !== 'minimal') ? llmsGetVendorIcon(vendorId) : null;
     const metrics = generator.metrics ? _prettyMetrics(generator.metrics, complexity) : null;
     const stopReason = generator.tokenStopReason ? _prettyTokenStopReason(generator.tokenStopReason, complexity) : null;
 
@@ -271,6 +272,7 @@ function _prettyMetrics(metrics: DMessageGenerator['metrics'], uiComplexityMode:
 
   const showWaitingTime = metrics?.dtStart !== undefined && (uiComplexityMode === 'extra' || metrics.dtStart >= 10000);
   const showSpeedSection = uiComplexityMode !== 'minimal' && (showWaitingTime || metrics?.vTOutInner !== undefined);
+  const showTimeSection = showSpeedSection && !!metrics?.dtAll;
 
   const costCode = metrics.$code ? _prettyCostCode(metrics.$code) : null;
 
@@ -309,8 +311,12 @@ function _prettyMetrics(metrics: DMessageGenerator['metrics'], uiComplexityMode:
         })</small>
       </>}
     </div>}
-    {costCode && metrics?.$c !== undefined ? <div>Costs:</div> : <div />}
+    {costCode && <div>{metrics?.$c !== undefined ? 'Costs:' : ''}</div>}
     {costCode && <div><em>{costCode}</em></div>}
+
+    {/* Time */}
+    {showTimeSection && <div>Time:</div>}
+    {showTimeSection && <div><b>{(Math.round(metrics.dtAll! / 100) / 10).toLocaleString()}</b> s</div>}
   </Box>;
 }
 
@@ -341,11 +347,14 @@ function _prettyTokenStopReason(reason: DMessageGenerator['tokenStopReason'], co
       return complexity === 'extra' ? 'Error' : '';
     case 'out-of-tokens':
       return 'Out of Tokens';
+    default:
+      const _exhaustiveCheck: never = reason;
+      return null;
   }
 }
 
 
-const oaiORegex = /gpt-[345](?:o|\.\d+)?-|o[1345]-|chatgpt-4o|computer-use-/;
+const oaiORegex = /gpt-[345](?:o|\.\d+)?-|o[1345]-|chatgpt-[45]o?|gpt-5-chat|computer-use-/;
 const geminiRegex = /gemini-|gemma-|learnlm-/;
 
 
@@ -364,6 +373,7 @@ export function prettyShortChatModelName(model: string | undefined): string {
     if (versionIndex !== -1) cutModel = cutModel.slice(0, versionIndex);
     return cutModel
       .replace('chatgpt-', 'ChatGPT_')
+      .replace('gpt-5-chat-', 'ChatGPT-5 ')
       .replace('gpt-', 'GPT_')
       // feature variants
       .replace('-audio', ' Audio')
@@ -422,6 +432,7 @@ export function prettyShortChatModelName(model: string | undefined): string {
       .replace('pro', 'Pro')
       .replace('flash', 'Flash')
       // feature variants
+      .replace('robotics er', 'Robotics')
       .replace('generation', 'Gen')
       .replace('image', 'Image')
       .replace('thinking', 'Thinking')
@@ -455,10 +466,11 @@ export function prettyShortChatModelName(model: string | undefined): string {
   }
   // [xAI]
   if (model.includes('grok-')) {
-    if (model.includes('grok-3') || model.includes('grok-2')) {
+    if (['grok-code', 'grok-4', 'grok-3', 'grok-2'].some(m => model.includes(m))) {
       return model
         .replace('xai-', '')
         .replace('-beta', '')
+        .replace('-non-reasoning', '')
         .split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
     }
     if (model.includes('grok-beta')) return 'Grok Beta';
@@ -474,14 +486,29 @@ export function prettyShortChatModelName(model: string | undefined): string {
 }
 
 function _prettyAnthropicModelName(modelId: string): string | null {
-  const claudeIndex = modelId.indexOf('claude-3');
-  if (claudeIndex === -1) return null;
+  if (modelId.indexOf('claude-') === -1) return null; // not a Claude model
+
+  // must match any known prefix
+  let claudeIndex = -1;
+  const claudePrefixes = ['claude-opus-4', 'claude-sonnet-4', 'claude-haiku-4', 'claude-3', 'claude-2'];
+  for (const prefix of claudePrefixes) {
+    const index = modelId.indexOf(prefix);
+    if (index !== -1) {
+      claudeIndex = index;
+      break;
+    }
+  }
 
   const subStr = modelId.slice(claudeIndex);
   const version =
-    subStr.includes('-3-7-') ? '3.7'
-      : subStr.includes('-3-5-') ? '3.5'
-        : '3';
+    subStr.includes('-4-5') ? '4.5' // fixes the -5
+      : subStr.includes('-3-5') ? '3.5' // fixes the -5
+        : subStr.includes('-5') ? '5'
+          : subStr.includes('-4-1') ? '4.1'
+            : subStr.includes('-4') ? '4'
+              : subStr.includes('-3-7') ? '3.7'
+                : subStr.includes('-3') ? '3'
+                  : '?';
 
   if (subStr.includes(`-opus`)) return `Claude ${version} Opus`;
   if (subStr.includes(`-sonnet`)) return `Claude ${version} Sonnet`;

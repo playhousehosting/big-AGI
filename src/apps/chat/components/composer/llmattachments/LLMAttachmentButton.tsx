@@ -22,7 +22,7 @@ import { RenderImageRefDBlob } from '~/modules/blocks/image/RenderImageRefDBlob'
 import { RenderImageURL } from '~/modules/blocks/image/RenderImageURL';
 
 import type { AttachmentDraft, AttachmentDraftConverterType, AttachmentDraftId } from '~/common/attachment-drafts/attachment.types';
-import { DMessageDataRef, DMessageImageRefPart, isImageRefPart } from '~/common/stores/chat/chat.fragments';
+import { DMessageDataRef, DMessageImageRefPart, isImageRefPart, isZyncAssetImageReferencePartWithLegacyDBlob } from '~/common/stores/chat/chat.fragments';
 import { LiveFileIcon } from '~/common/livefile/liveFile.icons';
 import { TooltipOutlined } from '~/common/components/TooltipOutlined';
 import { ellipsizeFront, ellipsizeMiddle } from '~/common/util/textUtils';
@@ -115,8 +115,8 @@ const converterTypeToIconMap: { [key in AttachmentDraftConverterType]: React.Com
 };
 
 function attachmentIcons(attachmentDraft: AttachmentDraft, noTooltips: boolean, onViewImageRefPart: (imageRefPart: DMessageImageRefPart) => void) {
-  const activeConterters = attachmentDraft.converters.filter(c => c.isActive);
-  if (activeConterters.length === 0)
+  const activeConverters = attachmentDraft.converters.filter(c => c.isActive);
+  if (activeConverters.length === 0)
     return null;
 
   // Alternate icon for the Web Page Screenshot
@@ -127,15 +127,21 @@ function attachmentIcons(attachmentDraft: AttachmentDraft, noTooltips: boolean, 
   let outputSingleImageRefDBlobs: Extract<DMessageDataRef, { reftype: 'dblob' }>[] = [];
   if (!urlImageData && attachmentDraft.outputFragments.length === 1) {
     const fragment = attachmentDraft.outputFragments[0];
-    if (isImageRefPart(fragment.part) && fragment.part.dataRef && fragment.part.dataRef.reftype === 'dblob')
+    if (isZyncAssetImageReferencePartWithLegacyDBlob(fragment.part))
+      outputSingleImageRefDBlobs = [fragment.part._legacyImageRefPart!.dataRef];
+    else if (isImageRefPart(fragment.part) && fragment.part.dataRef && fragment.part.dataRef.reftype === 'dblob')
       outputSingleImageRefDBlobs = [fragment.part.dataRef];
   }
 
   const handleViewFirstImage = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (attachmentDraft.outputFragments[0] && isImageRefPart(attachmentDraft.outputFragments[0].part))
-      onViewImageRefPart(attachmentDraft.outputFragments[0].part);
+    const fragment = attachmentDraft.outputFragments[0];
+    if (!fragment) return;
+    if (isZyncAssetImageReferencePartWithLegacyDBlob(fragment.part))
+      onViewImageRefPart(fragment.part._legacyImageRefPart!);
+    else if (isImageRefPart(fragment.part))
+      onViewImageRefPart(fragment.part);
   };
 
   // Whether to render the converters
@@ -162,12 +168,13 @@ function attachmentIcons(attachmentDraft: AttachmentDraft, noTooltips: boolean, 
     )}
 
     {/* Render DBlob referred images in place of converter icons */}
-    {outputSingleImageRefDBlobs.map((dataRef, i) => dataRef && (
+    {outputSingleImageRefDBlobs.map((dataRef, _i) => dataRef && (
       <TooltipOutlined key={`image-${dataRef.dblobAssetId}`} title={noTooltips ? null : <>View converted image{/* <br/>{dataRef?.bytesSize?.toLocaleString()} bytes */}</>} placement='top-start'>
         <div>
           <RenderImageRefDBlob
             dataRefDBlobAssetId={dataRef.dblobAssetId}
             dataRefMimeType={dataRef.mimeType}
+            dataRefBytesSize={dataRef.bytesSize}
             variant='attachment-button'
             scaledImageSx={attachmentIconSx}
             onClick={handleViewFirstImage}
@@ -176,8 +183,8 @@ function attachmentIcons(attachmentDraft: AttachmentDraft, noTooltips: boolean, 
       </TooltipOutlined>
     ))}
 
-    {/*{activeConterters.some(c => c.id.startsWith('url-page-')) ? <LanguageIcon sx={{ opacity: 0.2, ml: -2.5 }} /> : null}*/}
-    {renderConverterIcons && activeConterters.map((_converter, idx) => {
+    {/*{activeConverters.some(c => c.id.startsWith('url-page-')) ? <LanguageIcon sx={{ opacity: 0.2, ml: -2.5 }} /> : null}*/}
+    {renderConverterIcons && activeConverters.map((_converter, idx) => {
       const Icon = converterTypeToIconMap[_converter.id] ?? null;
       return !Icon ? null : (
         <TooltipOutlined key={`${_converter.id}-${idx}`} title={noTooltips ? null : `Attached as ${_converter.name}`} placement='top-start'>

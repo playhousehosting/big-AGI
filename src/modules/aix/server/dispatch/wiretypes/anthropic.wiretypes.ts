@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import * as z from 'zod/v4';
 
 
 /**
@@ -44,14 +44,14 @@ export namespace AnthropicWire_Blocks {
     type: z.literal('tool_use'),
     id: z.string(),
     name: z.string(), // length: 1-64
-    input: z.any(), // NOTE: formally an 'object', not any, probably relaxed for parsing
+    input: z.any(), // FC args OBJ/STRING? - NOTE: formally an 'object', not any, probably relaxed for Zod parsing, will be checked via code
   });
 
   export const ToolResultBlock_schema = _CommonBlock_schema.extend({
     type: z.literal('tool_result'),
     tool_use_id: z.string(),
     // NOTE: could be a string too, but we force it to be an array for a better implementation
-    content: z.array(z.union([TextBlock_schema, ImageBlock_schema])).optional(),
+    content: z.array(z.union([TextBlock_schema, ImageBlock_schema])).optional(), // FC-R response STRING!
     is_error: z.boolean().optional(), // default: false
   });
 
@@ -172,7 +172,7 @@ export namespace AnthropicWire_Tools {
     name: z.string(),
 
     /** 2024-10-22: cache-control can be set on the Tools block as well. We could make use of this instead of the System Instruction blocks for prompts with longer tools. */
-    cache_control: AnthropicWire_Blocks._CacheControl_schema.optional(),
+    cache_control: AnthropicWire_Blocks._CacheControl_schema.nullish(),
   });
 
   const _CustomToolDefinition_schema = _ToolDefinitionBase_schema.extend({
@@ -197,9 +197,10 @@ export namespace AnthropicWire_Tools {
      */
     input_schema: z.object({
       type: z.literal('object'),
-      properties: z.record(z.unknown()).nullable(),
+      properties: z.json().nullable(), // FC-DEF params schema
       required: z.array(z.string()).optional(), // 2025-02-24: seems to be removed; we may still have this, but it may also be within the 'properties' object
-    }).and(z.record(z.unknown())),
+    }),
+    // .and(z.record(z.unknown())), // 2025-06-26: removed this - unknown why it was here
   });
 
   const _ComputerUseTool_20241022_schema = _ToolDefinitionBase_schema.extend({
@@ -236,6 +237,28 @@ export namespace AnthropicWire_Tools {
 // Messages > Create
 //
 export namespace AnthropicWire_API_Message_Create {
+
+  /// Shared Schemas
+
+  /**
+   * Stop reason values that indicate why Claude stopped generating.
+   * - 'end_turn': the model reached a natural stopping point
+   * - 'max_tokens': exceeded the requested max_tokens limit
+   * - 'stop_sequence': one of the custom stop_sequences was generated
+   * - 'tool_use': the model wants to use a tool
+   * - 'pause_turn': paused for server tools (e.g. web search)
+   * - 'refusal': Claude refused due to safety concerns
+   * - 'model_context_window_exceeded': hit the model's context window limit
+   */
+  const StopReason_schema = z.enum([
+    'end_turn',
+    'max_tokens',
+    'stop_sequence',
+    'tool_use',
+    'pause_turn',
+    'refusal',
+    'model_context_window_exceeded',
+  ]);
 
   /// Request
 
@@ -365,16 +388,10 @@ export namespace AnthropicWire_API_Message_Create {
     content: z.array(AnthropicWire_Messages.ContentBlockOutput_schema),
 
     /**
-     * This may be one the following values:
-     *
-     * "end_turn": the model reached a natural stopping point
-     * "max_tokens": we exceeded the requested max_tokens or the model's maximum
-     * "stop_sequence": one of your provided custom stop_sequences was generated
-     * Note that these values are different than those in /v1/complete, where end_turn and stop_sequence were not differentiated.
-     *
+     * The reason why Claude stopped generating.
      * In non-streaming mode this value is always non-null. In streaming mode, it is null in the message_start event and non-null otherwise.
      */
-    stop_reason: z.enum(['end_turn', 'max_tokens', 'stop_sequence', 'tool_use']).nullable(),
+    stop_reason: StopReason_schema.nullable(),
     // Which custom stop sequence was generated, if any.
     stop_sequence: z.string().nullable(),
 
@@ -402,7 +419,7 @@ export namespace AnthropicWire_API_Message_Create {
     type: z.literal('message_delta'),
     // MessageDelta
     delta: z.object({
-      stop_reason: z.enum(['end_turn', 'max_tokens', 'stop_sequence', 'tool_use']).nullable(),
+      stop_reason: StopReason_schema.nullable(),
       stop_sequence: z.string().nullable(),
     }),
     // MessageDeltaUsage

@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import * as z from 'zod/v4';
 
 
 export namespace GeminiWire_ContentParts {
@@ -73,9 +73,10 @@ export namespace GeminiWire_ContentParts {
 
   export const FunctionCallPart_schema = z.object({
     functionCall: z.object({
+      id: z.string().optional(), // if populated, the client to execute the functionCall and return the response with the matching id
       name: z.string(),
       /** The function parameters and values in JSON object format. */
-      args: z.record(z.any()).optional(),
+      args: z.json().optional(), // FC args
     }),
   });
 
@@ -91,10 +92,24 @@ export namespace GeminiWire_ContentParts {
    */
   const FunctionResponsePart_schema = z.object({
     functionResponse: z.object({
+      /** The id of the function call this response is for */
+      id: z.string().optional(), // populated by the client to match the corresponding function call id.
       /** Corresponds to the related FunctionDeclaration.name */
       name: z.string(),
-      /** The function response in JSON object format. */
-      response: z.record(z.any()).optional(),
+      /** The function response in JSON object format */
+      response: z.json().optional(), // FC-R response
+
+      // -- the following fields are only applicable to NON_BLOCKING function calls
+
+      /** Signals that function call continues, and more responses will be returned, turning the function call into a generator. */
+      willContinue: z.boolean().optional(),
+      /** Specifies how the response should be scheduled in the conversation */
+      scheduling: z.enum([
+        'SCHEDULING_UNSPECIFIED', // unused
+        'SILENT', // only add the result to the conversation context, do not interrupt or trigger generation
+        'WHEN_IDLE', // add the result to the conversation context, and prompt to generate output without interrupting ongoing generation
+        'INTERRUPT', // add the result to the conversation context, interrupt ongoing generation and prompt to generate output.
+      ]).optional(),
     }),
   });
 
@@ -251,6 +266,7 @@ export namespace GeminiWire_ToolDeclarations {
   export const FunctionDeclaration_schema = z.object({
     name: z.string(),
     description: z.string(),
+
     /**
      *  Subset of OpenAPI 3.0 schema object
      *  https://ai.google.dev/api/rest/v1beta/cachedContents#schema
@@ -261,36 +277,50 @@ export namespace GeminiWire_ToolDeclarations {
       /**
        * For stricter validation, use the OpenAPI_Schema.Object_schema
        */
-      properties: z.record(z.any()).optional(),
+      properties: z.json().optional(), // FC-DEF params schema
       required: z.array(z.string()).optional(),
     }).optional(),
+
     /**
+     * The Schema defines the type used for the 'future' response value of the function.
      * JSON Schema output format (per-function). Reflects the Open API 3.03 Response Object.
-     * The Schema defines the type used for the response value of the function.
      */
-    response: z.record(z.any()).optional(),
+    response: z.json().optional(), // FC-DEF output schema
+
+    /** Specifies the function Behavior. Currently only supported by the BidiGenerateContent method. */
+    behavior: z.enum([
+      'UNSPECIFIED', // unused
+      'BLOCKING', // if set, the system will wait to receive the function response before continuing the conversation
+      'NON_BLOCKING', // if set, the system will attempt to handle function responses as they become available while maintaining the conversation between the user and the model
+    ]).optional(),
   });
 
   const GoogleSearch_schema = z.object({
-    // Empty object in the API definition
+    // Optional time range filter for Google Search results
+    timeRangeFilter: z.object({
+      /** Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z") */
+      startTime: z.string(),
+      /** End time in ISO 8601 format (e.g., "2024-12-31T23:59:59Z") */
+      endTime: z.string(),
+    }).optional(),
   });
 
   // 2025-03-14: Gemini has de-facto phased out GoogleSearchRetrieval, there's no more
-  const GoogleSearchRetrieval_schema = z.object({
-    dynamicRetrievalConfig: z.object({
-      /** The mode of the predictor to be used in dynamic retrieval. */
-      mode: z.enum(['MODE_UNSPECIFIED', 'MODE_DYNAMIC']),
-      /** The threshold to be used in dynamic retrieval. If not set, a system default value is used. */
-      dynamicThreshold: z.number().optional(),
-    }).optional(),
-  });
+  // const GoogleSearchRetrieval_schema = z.object({
+  //   dynamicRetrievalConfig: z.object({
+  //     /** The mode of the predictor to be used in dynamic retrieval. */
+  //     mode: z.enum(['MODE_UNSPECIFIED', 'MODE_DYNAMIC']),
+  //     /** The threshold to be used in dynamic retrieval. If not set, a system default value is used. */
+  //     dynamicThreshold: z.number().optional(),
+  //   }).optional(),
+  // });
 
   export const Tool_schema = z.object({
     codeExecution: CodeExecution_schema.optional(),
     functionDeclarations: z.array(FunctionDeclaration_schema).optional(),
     googleSearch: GoogleSearch_schema.optional(),
     // 2025-03-14: disabled as it's gone for all models
-    googleSearchRetrieval: GoogleSearchRetrieval_schema.optional(),
+    // googleSearchRetrieval: GoogleSearchRetrieval_schema.optional(),
   });
 
   export const ToolConfig_schema = z.object({
@@ -452,7 +482,12 @@ export namespace GeminiWire_API_Generate_Content {
      * - [Classify mode] 'text/x.enum' + { "type": "STRING", "enum": ["A", "B", "C"] } = ENUM as a string response
      */
     responseMimeType: responseMimeType_enum.optional(),
-    responseSchema: z.record(z.any()).optional(), // if set, responseMimeType must be 'application/json'
+    /**
+     * Output schema of the generated candidate text.
+     * Schemas must be a subset of the OpenAPI schema and can be objects, primitives or arrays.
+     * if set -> responseMimeType must be 'application/json'
+     */
+    responseSchema: z.json().optional(), // JSON Mode: schema
 
     /**
      * Requested modalities of the response. (if empty this is equivalent ot ['TEXT'])
@@ -488,6 +523,12 @@ export namespace GeminiWire_API_Generate_Content {
       thinkingBudget: z.number().optional(),
     }).optional(),
 
+    // Image generation configuration
+    imageConfig: z.object({
+      /** Controls the aspect ratio of generated images */
+      aspectRatio: z.enum(['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9']).optional(),
+    }).optional(),
+
     // Added on 2025-01-10 - Low-level - not requested/used yet but added
     presencePenalty: z.number().optional(),     // A positive penalty incresases the vocabulary of the response
     frequencyPenalty: z.number().optional(),    // A positive penalty incresases the vocabulary of the response
@@ -513,7 +554,7 @@ export namespace GeminiWire_API_Generate_Content {
 
   // Response
 
-  /** Last synced from https://ai.google.dev/api/generate-content#candidate on 2024-08-03 */
+  /** Last synced from https://ai.google.dev/api/generate-content#candidate on 2025-10-13 */
   const FinishReason_enum = z.enum([
     'FINISH_REASON_UNSPECIFIED',  // unused
     'STOP',                       // Natural stop point of the model or provided stop sequence.
@@ -527,6 +568,12 @@ export namespace GeminiWire_API_Generate_Content {
     'SPII',                       // Token generation stopped because the content potentially contains Sensitive Personally Identifiable Information (SPII).
     'MALFORMED_FUNCTION_CALL',    // The function call generated by the model is invalid.
     'IMAGE_SAFETY',               // Token generation stopped because generated images contain safety violations.
+    'IMAGE_PROHIBITED_CONTENT',   // Image generation stopped because generated images has other prohibited content.
+    'IMAGE_OTHER',                // Image generation stopped because of other miscellaneous issue.
+    'NO_IMAGE',                   // The model was expected to generate an image, but none was generated.
+    'IMAGE_RECITATION',           // Image generation stopped due to recitation.
+    'UNEXPECTED_TOOL_CALL',       // Model generated a tool call but no tools were enabled in the request.
+    'TOO_MANY_TOOL_CALLS',        // Model called too many tools consecutively, thus the system exited execution.
   ]);
 
   /** A citation to a source for a portion of a specific response. **/
@@ -564,6 +611,25 @@ export namespace GeminiWire_API_Generate_Content {
     text: z.string(),
   });
 
+  const UrlRetrievalStatus_enum = z.enum([
+    'URL_RETRIEVAL_STATUS_UNSPECIFIED',
+    'URL_RETRIEVAL_STATUS_SUCCESS',
+    'URL_RETRIEVAL_STATUS_ERROR',
+    'URL_RETRIEVAL_STATUS_PAYWALL',
+    'URL_RETRIEVAL_STATUS_UNSAFE',
+  ]);
+
+  const UrlMetadata_schema = z.object({
+    /** Retrieved url by the tool. */
+    retrievedUrl: z.string(),
+    /** Status of the url retrieval. */
+    urlRetrievalStatus: UrlRetrievalStatus_enum,
+  });
+
+  const UrlContextMetadata_schema = z.object({
+    urlMetadata: z.array(UrlMetadata_schema),
+  });
+
   const GroundingMetadata_schema = z.object({
     /** supporting references retrieved from specified grounding source */
     groundingChunks: z.array(/*z.union([*/z.object({
@@ -576,7 +642,7 @@ export namespace GeminiWire_API_Generate_Content {
     /** List of grounding support: segment + arrays of chunks + arrays of probs  */
     groundingSupports: z.array(z.object({
       groundingChunkIndices: z.array(z.number().int()), // citations associated with the claim, indices into ../groundingChunks[]
-      confidenceScores: z.array(z.number()),            // 0..1
+      confidenceScores: z.array(z.number()).optional(), // 0..1 - optional: not always returned by Gemini API
       segment: groundingMetadata_Segment_schema,
     })).optional(),
 
@@ -646,10 +712,21 @@ export namespace GeminiWire_API_Generate_Content {
      * Grounding metadata for the candidate.
      * This field is populated for GenerateContent calls.
      * ONLY for GenerateContent calls with grounding enabled:
-     * - tools = [{googleSearch: {}}], or
-     * - tools = [{googleSearchRetrieval: {}}]
+     * - tools = [{googleSearch: {}}]
      */
     groundingMetadata: GroundingMetadata_schema.optional(),
+
+    /**
+     * Metadata related to url context retrieval tool.
+     * This field is populated when URL context retrieval is used.
+     */
+    urlContextMetadata: UrlContextMetadata_schema.optional(),
+
+    /**
+     * Details the reason why the model stopped generating tokens.
+     * This is populated only when finishReason is set.
+     */
+    finishMessage: z.string().optional(),
 
     // We choose to ignore the following and save the parsing time (we do not use or support logProbs):
     // avgLogprobs: z.number().optional(),
@@ -685,7 +762,7 @@ export namespace GeminiWire_API_Generate_Content {
 
     // Modality breakdowns - mostly commented out because we don't want to spend energy parsing them for now (we don't use them)
     promptTokensDetails: z.array(ModalityTokenCount_schema).optional(),
-    // cacheTokensDetails: z.array(ModalityTokenCount_schema).optional(),
+    cacheTokensDetails: z.array(ModalityTokenCount_schema).optional(),
     // candidatesTokensDetails: z.array(ModalityTokenCount_schema).optional(),
     // toolUsePromptTokensDetails: z.array(ModalityTokenCount_schema).optional(),
   });
@@ -746,6 +823,8 @@ export namespace GeminiWire_API_Models_List {
     temperature: z.number().optional(),
     topP: z.number().optional(),
     topK: z.number().int().optional(),
+    maxTemperature: z.number().optional(),
+    thinking: z.boolean().optional(),
   });
 
   export type Response = z.infer<typeof Response_schema>;

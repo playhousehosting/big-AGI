@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import * as z from 'zod/v4';
 
 import { createTRPCRouter, publicProcedure } from '~/server/trpc/trpc.server';
 import { env } from '~/server/env';
@@ -6,12 +6,12 @@ import { fetchJsonOrTRPCThrow, fetchTextOrTRPCThrow } from '~/server/trpc/trpc.r
 
 import { LLM_IF_OAI_Chat, LLM_IF_OAI_Fn, LLM_IF_OAI_Vision } from '~/common/stores/llms/llms.types';
 import { capitalizeFirstLetter } from '~/common/util/textUtils';
-import { fixupHost } from '~/common/util/urlUtils';
 
 import { ListModelsResponse_schema } from '../llm.server.types';
 
 import { OLLAMA_BASE_MODELS, OLLAMA_PREV_UPDATE } from './ollama.models';
 import { wireOllamaListModelsSchema, wireOllamaModelInfoSchema } from './ollama.wiretypes';
+import { fixupHost } from '~/modules/llms/server/openai/openai.router';
 
 
 // Default hosts
@@ -139,7 +139,7 @@ export const llmOllamaRouter = createTRPCRouter({
           label: capitalizeFirstLetter(model_id),
           tag: 'latest',
           tags: model.tags?.length ? model.tags : [],
-          description: model.description,
+          description: '', // model.description, // REMOVED description - bloated and not used by nobody
           pulls: model.pulls,
           isNew: !!model.added && model.added > OLLAMA_PREV_UPDATE,
         })),
@@ -205,7 +205,7 @@ export const llmOllamaRouter = createTRPCRouter({
           // pretty label and description
           const label = capitalizeFirstLetter(modelName) + ((modelTag && modelTag !== 'latest') ? ` (${modelTag})` : '');
           const baseModel = OLLAMA_BASE_MODELS[modelName] ?? {};
-          let description = baseModel.description || 'Model unknown';
+          let description = ''; // baseModel.description || 'Model unknown'; // REMOVED description - bloated and not used by nobody
 
           // prepend the parameters count and quantization level
           if (model.details?.quantization_level || model.details?.format || model.details?.parameter_size) {
@@ -213,7 +213,7 @@ export const llmOllamaRouter = createTRPCRouter({
             if (model.details.quantization_level)
               firstLine += `(${model.details.quantization_level}` + ((model.details.format) ? `, ${model.details.format})` : ')');
             if (model.size)
-              firstLine += `, ${Math.round(model.size / 1024 / 1024).toLocaleString()} MB`;
+              firstLine += `, ${(model.size / 1024 / 1024 / 1024).toFixed(1)} GB`;
             if (baseModel.hasTools)
               firstLine += ' [tools]';
             if (baseModel.hasVision)

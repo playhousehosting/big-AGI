@@ -14,7 +14,6 @@ import { BrowseSettings } from '~/modules/browse/BrowseSettings';
 import { DallESettings } from '~/modules/t2i/dalle/DallESettings';
 import { ElevenlabsSettings } from '~/modules/elevenlabs/ElevenlabsSettings';
 import { GoogleSearchSettings } from '~/modules/google/GoogleSearchSettings';
-import { ProdiaSettings } from '~/modules/t2i/prodia/ProdiaSettings';
 import { T2ISettings } from '~/modules/t2i/T2ISettings';
 
 import type { PreferencesTabId } from '~/common/layout/optima/store-layout-optima';
@@ -200,7 +199,7 @@ export function SettingsModal(props: {
 
   const { setTab } = props;
   const isToolsTab = props.tab === 'tools';
-  const enableAixDebugger = Is.Deployment.Localhost;
+  const enableAixDebuggerDialog = true;
 
   const handleSetTab = React.useCallback((_event: any, value: string | number | null) => {
     setTab((value ?? undefined) as PreferencesTabId);
@@ -215,17 +214,18 @@ export function SettingsModal(props: {
         </AppBreadcrumbs>
       }
       open={props.open} onClose={props.onClose}
+      fullscreen={isMobile}
       startButton={
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
           {!isToolsTab && <DarkModeToggleButton hasText />}
           {!isMobile && !isToolsTab && <Button variant='soft' color='neutral' onClick={props.onOpenShortcuts} startDecorator={<KeyboardCommandKeyOutlinedIcon color='primary' />} sx={darkModeToggleButtonSx}>
             Shortcuts
           </Button>}
+          {isToolsTab && <Button variant='soft' color='neutral' disabled={!enableAixDebuggerDialog} onClick={optimaActions().openAIXDebugger} startDecorator={<TerminalOutlinedIcon color={enableAixDebuggerDialog ? 'primary' : undefined} />} sx={darkModeToggleButtonSx}>
+            AI Inspector
+          </Button>}
           {isToolsTab && <Button variant='soft' color='neutral' onClick={optimaActions().openLogger} startDecorator={<TerminalOutlinedIcon color='primary' />} sx={darkModeToggleButtonSx}>
             Logs Viewer
-          </Button>}
-          {isToolsTab && <Button variant='soft' color='neutral' disabled={!enableAixDebugger} onClick={optimaActions().openAIXDebugger} startDecorator={<TerminalOutlinedIcon color={enableAixDebugger ? 'primary' : undefined} />} sx={darkModeToggleButtonSx}>
-            AIX Debugger
           </Button>}
         </Box>
       }
@@ -286,9 +286,6 @@ export function SettingsModal(props: {
             </Topic>
             <Topic icon='🖍️️' title='OpenAI'>
               <DallESettings />
-            </Topic>
-            <Topic icon='🖍️️' title='Prodia API' startCollapsed>
-              <ProdiaSettings noSkipKey />
             </Topic>
           </Topics>
         </TabPanel>

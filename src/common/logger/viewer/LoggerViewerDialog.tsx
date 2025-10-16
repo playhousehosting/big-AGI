@@ -16,6 +16,7 @@ import type { LogEntry, LogLevel, LogSource } from '../logger.types';
 import { useLoggerStore } from '../store-logger';
 
 import { LogEntryDetails } from './LogEntryDetails';
+import { useIsMobile } from '~/common/components/useMatchMedia';
 
 
 function _getLogLevelIcon(level: LogLevel) {
@@ -61,6 +62,7 @@ export function LogViewerDialog(props: {
   const [selectedLogId, setSelectedLogId] = React.useState<LogEntry['id'] | null>(null);
 
   // external state
+  const isMobile = useIsMobile();
   const entries = useLoggerStore(state => state.entries);
 
 
@@ -99,7 +101,9 @@ export function LogViewerDialog(props: {
       title='Client Logs'
       unfilterBackdrop
       // themedColor='neutral'
-      sx={{ maxWidth: undefined, overflow: 'hidden' }}
+      autoOverflow
+      fullscreen={isMobile || 'button'}
+      sx={{ maxWidth: undefined }}
     >
       <Box sx={{ display: 'flex', flexDirection: { xs: 'column', md: 'row' }, gap: 2, mb: 1 }}>
 
@@ -190,7 +194,17 @@ export function LogViewerDialog(props: {
                 className={selectedLogId === entry.id ? 'selected' : undefined}
               >
                 <td>{_getLogLevelIcon(entry.level)}</td>
-                <td><TimeAgo date={entry.timestamp} /></td>
+                <td>
+                  <TimeAgo date={entry.timestamp} />
+                  {entry.repetitionCount && (
+                    <Typography 
+                      level='body-xs' 
+                      sx={{ ml: 0.5, color: 'text.secondary' }}
+                    >
+                      (×{entry.repetitionCount})
+                    </Typography>
+                  )}
+                </td>
                 {/*<td>{_formatTime(entry.timestamp)}</td>*/}
                 <td>
                   <Chip
@@ -202,7 +216,14 @@ export function LogViewerDialog(props: {
                   </Chip>
                 </td>
                 <td style={{ whiteSpace: 'nowrap' }}>{entry.source}</td>
-                <td className='agi-ellipsize'>{entry.message}</td>
+                <td className='agi-ellipsize'>
+                  {entry.message}
+                  {entry.repetitionCount && (
+                    <Typography level='body-xs' sx={{ ml: 1, color: 'text.secondary', display: 'inline' }}>
+                      (×{entry.repetitionCount})
+                    </Typography>
+                  )}
+                </td>
                 <td>
                   {entry.actions && entry.actions.length > 0 && (
                     <Chip size='sm' variant='outlined'>

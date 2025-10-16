@@ -1,11 +1,13 @@
-import { addDBImageAsset } from '~/modules/dblobs/dblobs.images';
+import { addDBImageAsset } from '~/common/stores/blob/dblobs-portability';
 
 import type { MaybePromise } from '~/common/types/useful.types';
 import { DEFAULT_ADRAFT_IMAGE_MIMETYPE } from '~/common/attachment-drafts/attachment.pipeline';
-import { convertBase64Image, getImageDimensions } from '~/common/util/imageUtils';
-import { create_CodeExecutionInvocation_ContentFragment, create_CodeExecutionResponse_ContentFragment, create_FunctionCallInvocation_ContentFragment, createAnnotationsVoidFragment, createDMessageDataRefDBlob, createDVoidWebCitation, createErrorContentFragment, createImageContentFragment, createModelAuxVoidFragment, createTextContentFragment, DVoidModelAuxPart, isContentFragment, isModelAuxPart, isTextContentFragment, isVoidAnnotationsFragment, isVoidFragment } from '~/common/stores/chat/chat.fragments';
+import { convert_Base64WithMimeType_To_Blob } from '~/common/util/blobUtils';
+import { create_CodeExecutionInvocation_ContentFragment, create_CodeExecutionResponse_ContentFragment, create_FunctionCallInvocation_ContentFragment, createAnnotationsVoidFragment, createDMessageDataRefDBlob, createDVoidWebCitation, createErrorContentFragment, createModelAuxVoidFragment, createPlaceholderVoidFragment, createTextContentFragment, createZyncAssetReferenceContentFragment, DVoidModelAuxPart, DVoidPlaceholderModelOp, isContentFragment, isModelAuxPart, isTextContentFragment, isVoidAnnotationsFragment, isVoidFragment } from '~/common/stores/chat/chat.fragments';
 import { ellipsizeMiddle } from '~/common/util/textUtils';
+import { imageBlobTransform } from '~/common/util/imageUtils';
 import { metricsFinishChatGenerateLg, metricsPendChatGenerateLg } from '~/common/stores/metrics/metrics.chatgenerate';
+import { nanoidToUuidV4 } from '~/common/util/idUtils';
 import { presentErrorToHumans } from '~/common/util/errorUtils';
 
 import type { AixWire_Particles } from '../server/api/aix.wiretypes';
@@ -20,8 +22,7 @@ import { AixChatGenerateContent_LL, DEBUG_PARTICLES } from './aix.client';
 const GENERATED_IMAGES_CONVERT_TO_COMPRESSED = true; // converts PNG to WebP or JPEG to save IndexedDB space
 const GENERATED_IMAGES_COMPRESSION_QUALITY = 0.98;
 const ELLIPSIZE_DEV_ISSUE_MESSAGES = 4096;
-const MERGE_ISSUES_INTO_TEXT_PART_IF_OPEN = true;
-const DEBUG_LOG_PROFILER_ON_CLIENT = false; // print Profiling particles when they come in, otherwise ignore them
+const MERGE_ISSUES_INTO_TEXT_PART_IF_OPEN = false; // 2025-10-10: put errors in the dedicated part
 
 
 /**
@@ -94,7 +95,7 @@ export class ContentReassembler {
     if (DEBUG_PARTICLES)
       console.log('-> aix.p: abort-client');
 
-    // NOTE: this doens't go to the debugger anymore - as we only publish external particles to the debugger
+    // NOTE: this doesn't go to the debugger anymore - as we only publish external particles to the debugger
     await this.#reassembleParticle({ cg: 'end', reason: 'abort-client', tokenStopReason: 'client-abort-signal' });
   }
 
@@ -104,7 +105,7 @@ export class ContentReassembler {
 
     this.onCGIssue({ cg: 'issue', issueId: 'client-read', issueText: errorAsText });
 
-    // NOTE: this doens't go to the debugger anymore - as we only publish external particles to the debugger
+    // NOTE: this doesn't go to the debugger anymore - as we only publish external particles to the debugger
     await this.#reassembleParticle({ cg: 'end', reason: 'issue-rpc', tokenStopReason: 'cg-issue' });
   }
 
@@ -188,6 +189,11 @@ export class ContentReassembler {
   /// Particle Reassembly ///
 
   async #reassembleParticle(op: AixWire_Particles.ChatGenerateOp): Promise<void> {
+
+    // remove placeholder if any other content except heartbeat or void-placeholder
+    if (!('p' in op) || !(op.p === '❤' || op.p === 'vp'))
+      this.removePlaceholderIfAtIndex0();
+
     switch (true) {
 
       // TextParticleOp
@@ -222,11 +228,17 @@ export class ContentReassembler {
           case 'cer':
             this.onAddCodeExecutionResponse(op);
             break;
+          case 'ia':
+            await this.onAppendInlineAudio(op);
+            break;
           case 'ii':
             await this.onAppendInlineImage(op);
             break;
           case 'urlc':
             this.onAddUrlCitation(op);
+            break;
+          case 'vp':
+            this.onVoidPlaceholder(op);
             break;
           default:
             // noinspection JSUnusedLocalSymbols
@@ -245,13 +257,6 @@ export class ContentReassembler {
           case '_debugProfiler':
             if (this.debuggerFrameId)
               aixClientDebugger_setProfilerMeasurements(this.debuggerFrameId, op.measurements);
-            // Profiling particles will come in if the app is in "Debug Mode" + it's a Development build!
-            // Additionally to show them on the console (rather than just in the debugger) set the
-            // constant to `true`.
-            if (DEBUG_LOG_PROFILER_ON_CLIENT) {
-              console.warn('[AIX] chatGenerate profiler measurements:');
-              console.table(op.measurements);
-            }
             break;
           case 'end':
             this.onCGEnd(op);
@@ -264,6 +269,9 @@ export class ContentReassembler {
             break;
           case 'set-model':
             this.onModelName(op);
+            break;
+          case 'set-upstream-handle':
+            this.onResponseHandle(op);
             break;
           default:
             // noinspection JSUnusedLocalSymbols
@@ -386,50 +394,119 @@ export class ContentReassembler {
     this.currentTextFragmentIndex = null;
   }
 
+  private async onAppendInlineAudio(particle: Extract<AixWire_Particles.PartParticleOp, { p: 'ia' }>): Promise<void> {
+
+    // Break text accumulation, as we have a full audio part in the middle
+    this.currentTextFragmentIndex = null;
+
+    const { mimeType, a_b64: base64Data, label, generator, durationMs } = particle;
+    const safeLabel = label || 'Generated Audio';
+
+    try {
+
+      // create blob and play audio - this will throw on malformed data
+      const audioBlob = await convert_Base64WithMimeType_To_Blob(base64Data, mimeType, 'ContentReassembler.onAppendInlineAudio');
+      const audioUrl = URL.createObjectURL(audioBlob);
+
+      // Play the audio
+      const audio = new Audio(audioUrl);
+
+      // Clean up when audio ends or errors
+      const cleanup = () => {
+        URL.revokeObjectURL(audioUrl);
+        audio.removeEventListener('ended', cleanup);
+        audio.removeEventListener('error', cleanup);
+        audio.src = ''; // Release audio element reference
+      };
+      audio.addEventListener('ended', cleanup);
+      audio.addEventListener('error', cleanup);
+
+      // Play and handle immediate errors
+      audio.play().catch(error => {
+        console.warn('[Audio] Failed to play generated audio:', error);
+        cleanup();
+      });
+
+      // TEMP: show a label instead of adding the model part
+      this.accumulator.fragments.push(createTextContentFragment(`Generated audio ▶ \`${safeLabel}\`${durationMs ? ` (${Math.round(durationMs / 10) / 100}s)` : ''}`));
+
+      // Add the audio to the DBlobs DB
+      // const dblobAssetId = await addDBAudioAsset('global', 'app-chat', {
+      //   label: safeLabel,
+      //   data: {
+      //     mimeType: mimeType as any,
+      //     base64: base64Data,
+      //   },
+      //   origin: {
+      //     ot: 'generated',
+      //     source: 'ai-text-to-speech',
+      //     generatorName: generator ?? '',
+      //     prompt: '', // Audio doesn't have a prompt in this context
+      //     parameters: {},
+      //     generatedAt: new Date().toISOString(),
+      //   },
+      //   metadata: {
+      //     durationMs: durationMs || 0,
+      //     // Other audio metadata could be added here
+      //   },
+      // });
+
+      // Create DMessage data reference for the audio
+      // const bytesSizeApprox = Math.ceil((base64Data.length * 3) / 4);
+      // const audioAssetDataRef = createDMessageDataRefDBlob(
+      //   dblobAssetId,
+      //   particle.mimeType,
+      //   bytesSizeApprox,
+      // );
+
+      // Create the DMessageContentFragment for audio
+      // const audioContentFragment = createAudioContentFragment(
+      //   audioAssetDataRef,
+      //   safeLabel,
+      //   durationMs,
+      // );
+
+      // this.accumulator.fragments.push(audioContentFragment);
+
+    } catch (error: any) {
+      console.warn('[DEV] Failed to add inline audio to DBlobs:', { label: safeLabel, error, mimeType, size: base64Data.length });
+      // Add an error fragment instead
+      this.accumulator.fragments.push(createErrorContentFragment(`Failed to process audio: ${error?.message || 'Unknown error'}`));
+    }
+  }
+
   private async onAppendInlineImage(particle: Extract<AixWire_Particles.PartParticleOp, { p: 'ii' }>): Promise<void> {
 
     // Break text accumulation, as we have a full image part in the middle
     this.currentTextFragmentIndex = null;
 
-    let { mimeType, i_b64: base64Data, label, generator, prompt } = particle;
+    let { i_b64: inputBase64, mimeType: inputType, label, generator, prompt } = particle;
     const safeLabel = label || 'Generated Image';
 
     try {
 
-      let safeWidth;
-      let safeHeight;
+      // base64 -> blob conversion
+      let inputImage = await convert_Base64WithMimeType_To_Blob(inputBase64, inputType, 'ContentReassembler.onAppendInlineImage');
 
-      // TODO: re-evaluate conversion-before-storage (quality is 0.98 and WebP is really optimized, but still, this is not the 'original' data)
-      // PNG -> conversion to WebP or JPEG to save IndexedDB space - will
-      if (GENERATED_IMAGES_CONVERT_TO_COMPRESSED && mimeType === 'image/png') {
-        const preSize = base64Data.length;
-        const convertedData = await convertBase64Image(`data:${mimeType};base64,${base64Data}`, DEFAULT_ADRAFT_IMAGE_MIMETYPE, GENERATED_IMAGES_COMPRESSION_QUALITY).catch(() => null);
-        if (convertedData) {
-          mimeType = convertedData.mimeType;
-          base64Data = convertedData.base64;
-          safeWidth = convertedData.width || 0;
-          safeHeight = convertedData.height || 0;
-        }
-        const postSize = base64Data.length;
-        const sizeDiffPerc = preSize ? Math.round(((postSize - preSize) / preSize) * 100) : 0;
-        console.warn(`[image-pipeline] stored generated PNG as ${mimeType} (quality:${GENERATED_IMAGES_COMPRESSION_QUALITY}, ${sizeDiffPerc}% reduction, ${preSize?.toLocaleString()} -> ${postSize?.toLocaleString()})`);
-      }
-
-      // find out the dimensions (frontend)
-      if (!safeWidth || !safeHeight) {
-        const dimensions = await getImageDimensions(`data:${mimeType};base64,${base64Data}`).catch(() => null);
-        safeWidth = dimensions?.width || 0;
-        safeHeight = dimensions?.height || 0;
-      }
+      // perform resize/type conversion if desired, and find the image dimensions
+      const shallConvert = GENERATED_IMAGES_CONVERT_TO_COMPRESSED && inputType === 'image/png';
+      const { blob: imageBlob, height: imageHeight, width: imageWidth } = await imageBlobTransform(inputImage, {
+        convertToMimeType: shallConvert ? DEFAULT_ADRAFT_IMAGE_MIMETYPE : undefined,
+        convertToLossyQuality: GENERATED_IMAGES_COMPRESSION_QUALITY,
+        throwOnTypeConversionError: true,
+        debugConversionLabel: `ContentReassembler(ii)`,
+      });
 
       // add the image to the DBlobs DB
-      const dblobAssetId = await addDBImageAsset('global', 'app-chat', {
+      // FIXME: [ASSET] use the Asset Store
+      const dblobAssetId = await addDBImageAsset('app-chat', imageBlob, {
         label: safeLabel,
-        data: {
-          mimeType: mimeType as any,
-          base64: base64Data,
+        metadata: {
+          width: imageWidth,
+          height: imageHeight,
+          // description: '',
         },
-        origin: {
+        origin: { // Generation originated
           ot: 'generated',
           source: 'ai-text-to-image',
           generatorName: generator ?? '',
@@ -437,39 +514,31 @@ export class ContentReassembler {
           parameters: {}, // ?
           generatedAt: new Date().toISOString(),
         },
-        metadata: {
-          width: safeWidth,
-          height: safeHeight,
-          // description: '',
-        },
       });
 
-      // create DMessage a data reference {} for the image
-      const bytesSizeApprox = Math.ceil((base64Data.length * 3) / 4);
-      const imageAssetDataRef = createDMessageDataRefDBlob(
-        dblobAssetId,
-        particle.mimeType,
-        bytesSizeApprox,
+      // Create a Zync Image Asset Reference *Content* fragment, as this is image content from the LLM
+      const zyncImageAssetFragmentWithLegacy = createZyncAssetReferenceContentFragment(
+        nanoidToUuidV4(dblobAssetId, 'convert-dblob-to-dasset'),
+        prompt || safeLabel, // use prompt if available, otherwise use the label
+        'image',
+        {
+          pt: 'image_ref' as const,
+          dataRef: createDMessageDataRefDBlob(dblobAssetId, imageBlob.type, imageBlob.size),
+          ...(safeLabel ? { altText: safeLabel } : {}),
+          ...(imageWidth ? { width: imageWidth } : {}),
+          ...(imageHeight ? { height: imageHeight } : {}),
+        },
       );
 
-      // create the DMessageContentFragment - not attachment! as this comes from the assistant - so this is akin to the t2i-generated images
-      const imageContentFragment = createImageContentFragment(
-        imageAssetDataRef,
-        safeLabel,
-        safeWidth,
-        safeHeight,
-      );
-
-      this.accumulator.fragments.push(imageContentFragment);
-
+      this.accumulator.fragments.push(zyncImageAssetFragmentWithLegacy);
     } catch (error: any) {
-      console.warn('[DEV] Failed to add inline image to DBlobs:', { label, error, mimeType, size: base64Data.length });
+      console.warn('[DEV] Failed to add inline image to DBlobs:', { label, error, inputType, base64Length: inputBase64.length });
     }
   }
 
   private onAddUrlCitation(urlc: Extract<AixWire_Particles.PartParticleOp, { p: 'urlc' }>): void {
 
-    const { title, url, num: refNumber, from: startIndex, to: endIndex, text: textSnippet } = urlc;
+    const { title, url, num: refNumber, from: startIndex, to: endIndex, text: textSnippet, pubTs } = urlc;
 
     // reuse existing annotations - single fragment per message
     const existingFragment = this.accumulator.fragments.find(isVoidAnnotationsFragment);
@@ -480,7 +549,7 @@ export class ContentReassembler {
       if (!sameUrlCitation) {
         existingFragment.part.annotations = [
           ...existingFragment.part.annotations,
-          createDVoidWebCitation(url, title, refNumber, startIndex, endIndex, textSnippet),
+          createDVoidWebCitation(url, title, refNumber, startIndex, endIndex, textSnippet, pubTs),
         ];
       } else {
         if (startIndex !== undefined && endIndex !== undefined) {
@@ -494,13 +563,47 @@ export class ContentReassembler {
     } else {
 
       // create the *only* annotations fragment in the message
-      const newCitation = createDVoidWebCitation(url, title, refNumber, startIndex, endIndex, textSnippet);
+      const newCitation = createDVoidWebCitation(url, title, refNumber, startIndex, endIndex, textSnippet, pubTs);
       this.accumulator.fragments.push(createAnnotationsVoidFragment([newCitation]));
 
     }
 
     // Important: Don't reset currentTextFragmentIndex to allow text to continue
     // This ensures we don't interrupt the text flow
+  }
+
+  private onVoidPlaceholder(vp: Extract<AixWire_Particles.PartParticleOp, { p: 'vp' }>): void {
+    const { text, mot } = vp;
+
+    // update the model op
+    const modelOp: DVoidPlaceholderModelOp = { mot, cts: Date.now() };
+
+    // Only reuse placeholder if it's at index 0
+    if (this.accumulator.fragments.length > 0) {
+      const firstFragment = this.accumulator.fragments[0];
+      if (firstFragment.ft === 'void' && firstFragment.part.pt === 'ph') {
+        // Update existing placeholder at index 0
+        firstFragment.part.pText = text;
+        firstFragment.part.modelOp = modelOp;
+        return;
+      }
+    }
+
+    // Create new placeholder at the beginning (will be index 0)
+    const placeholderFragment = createPlaceholderVoidFragment(text, undefined, modelOp);
+    this.accumulator.fragments.unshift(placeholderFragment); // Add to beginning
+
+    // Placeholders don't affect text fragment indexing
+  }
+
+  // Helper to remove placeholder when real content arrives
+  private removePlaceholderIfAtIndex0(): void {
+    if (this.accumulator.fragments.length > 0) {
+      const firstFragment = this.accumulator.fragments[0];
+      if (firstFragment.ft === 'void' && firstFragment.part.pt === 'ph') {
+        this.accumulator.fragments.shift(); // Remove placeholder at index 0
+      }
+    }
   }
 
 
@@ -518,6 +621,7 @@ export class ContentReassembler {
       // normal stop
       case 'ok':                    // content
       case 'ok-tool_invocations':   // content + tool invocation
+      case 'ok-pause_continue':     // [Anthropic] server tools (e.g. web search) - successful pause, requires continuation
         break;
 
       case 'client-abort-signal':
@@ -534,6 +638,7 @@ export class ContentReassembler {
 
       case 'filter-content':        // inline text message shall have been added
       case 'filter-recitation':     // inline text message shall have been added
+      case 'filter-refusal':        // [Anthropic] model refused due to safety (same semantic as filtering)
         this.accumulator.genTokenStopReason = 'filter';
         break;
 
@@ -553,7 +658,7 @@ export class ContentReassembler {
       const currentTextFragment = this.currentTextFragmentIndex === null ? null
         : this.accumulator.fragments[this.currentTextFragmentIndex];
       if (currentTextFragment && isTextContentFragment(currentTextFragment)) {
-        currentTextFragment.part.text += ' ' + issueText;
+        currentTextFragment.part.text += (currentTextFragment.part.text ? '\n' : ' ') + issueText;
         return;
       }
     }
@@ -569,6 +674,16 @@ export class ContentReassembler {
 
   private onModelName({ name }: Extract<AixWire_Particles.ChatGenerateOp, { cg: 'set-model' }>): void {
     this.accumulator.genModelName = name;
+  }
+
+  private onResponseHandle({ handle }: Extract<AixWire_Particles.ChatGenerateOp, { cg: 'set-upstream-handle' }>): void {
+    // validate the handle
+    if (handle?.uht !== 'vnd.oai.responses' || !handle?.responseId || handle?.expiresAt === undefined) {
+      this._appendReassemblyDevError(`Invalid response handle received: ${JSON.stringify(handle)}`);
+      return;
+    }
+    // type check point for AixWire_Particles.ChatControlOp('set-upstream-handle') -> DUpstreamResponseHandle
+    this.accumulator.genUpstreamHandle = handle;
   }
 
 

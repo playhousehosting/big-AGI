@@ -9,6 +9,7 @@ import PlusOneRoundedIcon from '@mui/icons-material/PlusOneRounded';
 import StopRoundedIcon from '@mui/icons-material/StopRounded';
 
 import { FormLabelStart } from '~/common/components/forms/FormLabelStart';
+import { TooltipOutlined } from '~/common/components/TooltipOutlined';
 
 import type { BeamStoreApi } from '../store-beam.hooks';
 import { BEAM_BTN_SX, SCATTER_COLOR, SCATTER_RAY_PRESETS } from '../beam.config';
@@ -67,7 +68,8 @@ export function BeamScatterPane(props: {
   showRayAdd: boolean
   startEnabled: boolean,
   startBusy: boolean,
-  onStart: () => void,
+  startRestart: boolean,
+  onStart: (restart: boolean) => void,
   onStop: () => void,
   onExplainerShow: () => any,
 }) {
@@ -78,6 +80,12 @@ export function BeamScatterPane(props: {
       onExplainerShow={props.onExplainerShow}
     />
   ), [props.beamStore, props.onExplainerShow]);
+
+  const { onStart, startRestart } = props;
+
+  const handleStartClicked = React.useCallback((event: React.MouseEvent) => {
+    onStart(!startRestart ? false : event.shiftKey);
+  }, [onStart, startRestart]);
 
   return (
     <Box sx={props.isMobile ? mobileScatterPaneSx : desktopScatterPaneSx}>
@@ -116,12 +124,12 @@ export function BeamScatterPane(props: {
                 onClick={() => props.setRayCount(n)}
                 sx={{
                   // backgroundColor: isActive ? 'background.popup' : undefined,
-                  backgroundColor: isActive ? `${SCATTER_COLOR}.softBg` : 'background.popup',
+                  backgroundColor: !isActive ? `${SCATTER_COLOR}.softBg` : 'background.popup',
                   fontWeight: isActive ? 'xl' : 400, /* reset, from 600 */
                   width: '3rem',
                 }}
               >
-                {`x${n}`}
+                {n}
               </Button>
             );
           })}
@@ -132,9 +140,11 @@ export function BeamScatterPane(props: {
               onClick={() => props.setRayCount(props.rayCount + 1)}
               sx={{
                 backgroundColor: 'background.popup',
+                fontWeight: 'xl',
                 width: '3rem',
               }}
             >
+              {/*{'+'}*/}
               <PlusOneRoundedIcon />
             </Button>
           )}
@@ -143,16 +153,18 @@ export function BeamScatterPane(props: {
 
       {/* Start / Stop buttons */}
       {!props.startBusy ? (
-        <Button
-          // key='scatter-start' // used for animation triggering, which we don't have now
-          variant='solid' color={SCATTER_COLOR}
-          disabled={!props.startEnabled || props.startBusy} loading={props.startBusy}
-          endDecorator={<PlayArrowRoundedIcon />}
-          onClick={props.onStart}
-          sx={BEAM_BTN_SX}
-        >
-          Start
-        </Button>
+        <TooltipOutlined slowEnter title={startRestart ? 'Shift + Click to re-run active Beams' : null} placement='top-end'>
+          <Button
+            // key='scatter-start' // used for animation triggering, which we don't have now
+            variant='solid' color={SCATTER_COLOR}
+            disabled={!props.startEnabled || props.startBusy} loading={props.startBusy}
+            endDecorator={<PlayArrowRoundedIcon />}
+            onClick={handleStartClicked}
+            sx={BEAM_BTN_SX}
+          >
+            Start
+          </Button>
+        </TooltipOutlined>
       ) : (
         <Button
           // key='scatter-stop'

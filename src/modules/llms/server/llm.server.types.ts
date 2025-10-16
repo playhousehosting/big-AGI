@@ -1,7 +1,9 @@
-import { z } from 'zod';
+import * as z from 'zod/v4';
 
 import { LLMS_ALL_INTERFACES } from '~/common/stores/llms/llms.types';
 
+
+export type RequestAccessValues = { headers: HeadersInit; url: string; };
 
 export type ModelDescriptionSchema = z.infer<typeof ModelDescription_schema>;
 
@@ -76,21 +78,33 @@ const ModelParameterSpec_schema = z.object({
     'llmTopP',
     'llmForceNoStream',
     'llmVndAntThinkingBudget',
+    'llmVndGeminiAspectRatio',
+    'llmVndGeminiGoogleSearch',
     'llmVndGeminiShowThoughts',
     'llmVndGeminiThinkingBudget',
     'llmVndOaiReasoningEffort',
+    'llmVndOaiReasoningEffort4',
     'llmVndOaiRestoreMarkdown',
+    'llmVndOaiVerbosity',
     'llmVndOaiWebSearchContext',
     'llmVndOaiWebSearchGeolocation',
+    'llmVndOaiImageGeneration',
+    'llmVndPerplexityDateFilter',
+    'llmVndPerplexitySearchMode',
+    'llmVndXaiSearchMode',
+    'llmVndXaiSearchSources',
+    'llmVndXaiSearchDateFilter',
   ]),
   required: z.boolean().optional(),
   hidden: z.boolean().optional(),
-  initialValue: z.number().or(z.string()).nullable().optional(),
+  initialValue: z.number().or(z.string()).or(z.boolean()).nullable().optional(),
+  // special params
+  rangeOverride: z.tuple([z.number(), z.number()]).optional(), // [min, max]
 });
 
 export const ModelDescription_schema = z.object({
   id: z.string(),
-  idVariant: z.string().optional(),
+  idVariant: z.string().optional(), // only used on the client by '_createDLLMFromModelDescription' to instantiate 'unique' copies of the same model
   label: z.string(),
   created: z.number().optional(),
   updated: z.number().optional(),

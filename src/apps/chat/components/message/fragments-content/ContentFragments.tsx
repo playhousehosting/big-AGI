@@ -60,8 +60,8 @@ export function ContentFragments(props: {
   onEditsApply: (withControl: boolean) => void,
   onEditsCancel: () => void,
 
-  onFragmentBlank: () => void
-  onFragmentDelete: (fragmentId: DMessageFragmentId) => void,
+  onFragmentAddBlank?: () => void,
+  onFragmentDelete?: (fragmentId: DMessageFragmentId) => void,
   onFragmentReplace?: (fragmentId: DMessageFragmentId, newFragment: DMessageContentFragment) => void,
   onMessageDelete?: () => void,
 
@@ -78,8 +78,8 @@ export function ContentFragments(props: {
 
   // Content Fragments Edit Zero-State: button to create a new TextContentFragment
   if (isEditingText && isEmpty)
-    return (
-      <Button aria-label='message body empty' variant='plain' color='neutral' onClick={props.onFragmentBlank} sx={{ justifyContent: 'flex-start' }}>
+    return !props.onFragmentAddBlank ? null : (
+      <Button aria-label='message body empty' variant='plain' color='neutral' onClick={props.onFragmentAddBlank} sx={{ justifyContent: 'flex-start' }}>
         add text ...
       </Button>
     );
@@ -160,6 +160,51 @@ export function ContentFragments(props: {
             />
           );
 
+        case 'reference':
+          let errorMessage: string;
+          const rt = part.rt;
+          switch (rt) {
+            case 'zync':
+              const zt = part.zType
+              switch (zt) {
+                case 'asset':
+                  // TODO: [ASSET] future: implement rendering for the real Reference to Zync Asset
+                  if (part._legacyImageRefPart?.pt === 'image_ref')
+                    return (
+                      <BlockPartImageRef
+                        key={fId}
+                        imageRefPart={part._legacyImageRefPart}
+                        fragmentId={fId}
+                        contentScaling={props.contentScaling}
+                        onFragmentDelete={props.onFragmentDelete}
+                        onFragmentReplace={props.onFragmentReplace}
+                      />
+                    );
+                  errorMessage = `[DEV] ContentFragment: Asset System not implemented (zync asset ${part.zUuid})`;
+                  break;
+
+                default:
+                  const _exhaustiveCheck: never = zt;
+                  errorMessage = `[DEV] ContentFragment: unsupported zync reference type (${zt})`;
+              }
+              break;
+
+            case '_sentinel':
+              errorMessage = `[DEV] ContentFragment: sentinel reference type (_sentinel)`;
+              break;
+
+            default:
+              const _exhaustiveCheck: never = rt;
+              errorMessage = `[DEV] ContentFragment: unsupported reference type (${rt})`;
+          }
+          return (
+            <BlockPartError
+              key={fId}
+              errorText={errorMessage}
+              messageRole={props.messageRole}
+              contentScaling={props.contentScaling}
+            />
+          );
 
         case 'image_ref':
           return (
@@ -168,7 +213,7 @@ export function ContentFragments(props: {
               imageRefPart={part}
               fragmentId={fId}
               contentScaling={props.contentScaling}
-              onFragmentDelete={/*isMonoFragment ? undefined :*/ props.onFragmentDelete}
+              onFragmentDelete={props.onFragmentDelete}
               onFragmentReplace={props.onFragmentReplace}
             />
           );

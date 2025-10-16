@@ -7,9 +7,16 @@
  * need to use are documented accordingly near the end.
  */
 import type { FetchCreateContextFnOptions } from '@trpc/server/adapters/fetch';
-import { ZodError } from 'zod';
+import * as z from 'zod/v4';
 import { initTRPC } from '@trpc/server';
 import { transformer } from '~/server/trpc/trpc.transformer';
+
+
+/**
+ * Type of the Context object passed to procedures/resolvers, to avoid circular dependencies.
+ */
+export type ChatGenerateContentContext = Awaited<ReturnType<typeof createTRPCFetchContext>>;
+
 
 /**
  * 1. CONTEXT
@@ -46,7 +53,7 @@ const t = initTRPC.context<typeof createTRPCFetchContext>().create({
       data: {
         ...shape.data,
         zodError:
-          error.cause instanceof ZodError ? error.cause.flatten() : null,
+          error.cause instanceof z.ZodError ? z.treeifyError(error.cause) : null,
       },
     };
   },
