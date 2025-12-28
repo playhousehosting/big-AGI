@@ -103,13 +103,18 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
   //   console.log(`Anthropic: hotFixStartWithUser (${chatMessages.length} messages) - ${hackSystemMessageFirstLine}`);
   // }
 
+  // [Anthropic, 2025-11-13] constrained output modes - both JSON and tool invocations
+  const strictToolsEnabled = !!model.strictToolInvocations;
+  // [Anthropic, 2025-11-24] Tool Search Tool - when enabled, all custom tools get defer_loading: true
+  const toolSearchEnabled = !!model.vndAntToolSearch;
+
   // Construct the request payload
   const payload: TRequest = {
     max_tokens: model.maxTokens !== undefined ? model.maxTokens : 8192,
     model: model.id,
     system: systemMessage,
     messages: chatMessages,
-    tools: chatGenerate.tools && _toAnthropicTools(chatGenerate.tools),
+    tools: chatGenerate.tools && _toAnthropicTools(chatGenerate.tools, strictToolsEnabled, toolSearchEnabled),
     tool_choice: chatGenerate.toolsPolicy && _toAnthropicToolChoice(chatGenerate.toolsPolicy),
     // metadata: { user_id: ... }
     // stop_sequences: undefined,
@@ -138,15 +143,101 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
     delete payload.temperature;
   }
 
+  // [Anthropic] Effort parameter [Anthropic, effort-2025-11-24]
+  if (model.vndAntEffort /*&& model.vndAntEffort !== 'high'*/)
+    payload.output_config = {
+      effort: model.vndAntEffort,
+    };
+
+  // [Anthropic, 2025-11-13] Structured Outputs - JSON output format
+  if (model.strictJsonOutput) {
+
+    // auto-add additionalProperties: false to root object if not present - required by Anthropic
+    let schema = model.strictJsonOutput.schema;
+    if (schema && typeof schema === 'object' && schema.type === 'object' && schema.additionalProperties === undefined)
+      schema = { ...schema, additionalProperties: false };
+    payload.output_format = { type: 'json_schema', schema };
+
+    // warn about incompatible features (citations are enabled via web_fetch tool)
+    if (model.vndAntWebFetch === 'auto')
+      console.warn('[Anthropic] Structured output_format may conflict with web_fetch citations');
+  }
+
   // --- Tools ---
 
   // Allow/deny auto-adding hosted tools when custom tools are present
-  // const hasCustomTools = chatGenerate.tools?.some(t => t.type === 'function_call');
-  // const hasRestrictivePolicy = chatGenerate.toolsPolicy?.type === 'any' || chatGenerate.toolsPolicy?.type === 'function_call';
-  // const skipHostedToolsDueToCustomTools = hasCustomTools && hasRestrictivePolicy;
+  const hasCustomTools = chatGenerate.tools?.some(t => t.type === 'function_call');
+  const hasRestrictivePolicy = chatGenerate.toolsPolicy?.type === 'any' || chatGenerate.toolsPolicy?.type === 'function_call';
+  const skipHostedToolsDueToCustomTools = hasCustomTools && hasRestrictivePolicy;
 
   // Hosted tools
-  // ...
+  if (!skipHostedToolsDueToCustomTools) {
+    const hostedTools: NonNullable<TRequest['tools']> = [];
+
+    // Web Search Tool
+    if (model.vndAntWebSearch === 'auto') {
+      hostedTools.push({
+        type: 'web_search_20250305',
+        name: 'web_search',
+        max_uses: 10, // Allow up to 10 progressive searches // FIXME: HARDCODED
+      });
+    }
+
+    // Web Fetch Tool
+    if (model.vndAntWebFetch === 'auto') {
+      hostedTools.push({
+        type: 'web_fetch_20250910',
+        name: 'web_fetch',
+        max_uses: 5, // Allow up to 5 fetches
+        citations: { enabled: true }, // Enable citations
+      });
+    }
+
+    // [Anthropic, 2025-11-24] Tool Search Tool(s)
+    if (model.vndAntToolSearch === 'regex')
+      hostedTools.push({
+        type: 'tool_search_tool_regex_20251119',
+        name: 'tool_search_tool_regex',
+      });
+    else if (model.vndAntToolSearch === 'bm25')
+      hostedTools.push({
+        type: 'tool_search_tool_bm25_20251119',
+        name: 'tool_search_tool_bm25',
+      });
+
+    // Merge hosted tools with custom tools
+    if (hostedTools.length > 0) {
+      payload.tools = payload.tools ? [...payload.tools, ...hostedTools] : hostedTools;
+    }
+  }
+
+  // --- Skills Container ---
+
+  // Add Skills container if enabled (non-empty string)
+  if (model.vndAntSkills) {
+
+    // Parse comma-separated string and convert to Anthropic format
+    const skillIds = model.vndAntSkills.split(',').map((s: string) => s.trim()).filter((s: string) => s);
+
+    if (skillIds.length > 0) {
+
+      // request a container with those selected skills
+      payload.container = {
+        skills: skillIds.map((skillId: string) => ({
+          type: 'anthropic' as const,
+          skill_id: skillId,
+          version: 'latest',
+        })),
+      };
+
+      // also require the code_execution tool (required by Skills)
+      if (!payload.tools?.length)
+        payload.tools = [];
+
+      if (!payload.tools.some(t => t.type === 'code_execution_20250825'))
+        payload.tools.push({ type: 'code_execution_20250825', name: 'code_execution' });
+    }
+  }
 
 
   // Preemptive error detection with server-side payload validation before sending it upstream
@@ -299,12 +390,12 @@ function* _generateAnthropicMessagesContentBlocks({ parts, role }: AixMessages_C
   }
 }
 
-function _toAnthropicTools(itds: AixTools_ToolDefinition[]): NonNullable<TRequest['tools']> {
+function _toAnthropicTools(itds: AixTools_ToolDefinition[], strictToolsEnabled: boolean, toolSearchToolEnabled: boolean): NonNullable<TRequest['tools']> {
   return itds.map(itd => {
     switch (itd.type) {
 
       case 'function_call':
-        const { name, description, input_schema } = itd.function_call;
+        const { name, description, input_schema, allowed_callers, input_examples } = itd.function_call;
         return {
           type: 'custom', // we could not set it, but it helps our typesystem with discrimination
           name,
@@ -313,32 +404,20 @@ function _toAnthropicTools(itds: AixTools_ToolDefinition[]): NonNullable<TReques
             type: 'object',
             properties: input_schema?.properties || null, // Anthropic valid values for input_schema.properties are 'object' or 'null' (null is used to declare functions with no inputs)
             required: input_schema?.required,
+            // [Anthropic, 2025-11-13] Structured Outputs requires additionalProperties: false
+            ...(strictToolsEnabled ? { additionalProperties: false } : {}),
           },
+          // [Anthropic, 2025-11-13] Structured Outputs: strict mode guarantees tool inputs match schema
+          ...(strictToolsEnabled ? { strict: true } : {}),
+          // [Anthropic, 2025-11-24] Tool Search Tool - auto-defer all custom tools
+          ...(toolSearchToolEnabled ? { defer_loading: true } : {}),
+          // [Anthropic, 2025-11-24] Programmatic Tool Calling - pass through allowed_callers and input_examples
+          ...(allowed_callers ? { allowed_callers: allowed_callers.map(c => c === 'code_execution' ? 'code_execution_20250825' : c) } : {}),
+          ...(input_examples ? { input_examples } : {}),
         };
 
       case 'code_execution':
         throw new Error('Gemini code interpreter is not supported');
-
-      case 'vnd.ant.tools.computer_20241022':
-        return {
-          type: 'computer_20241022',
-          name: 'computer',
-          display_width_px: itd.display_width,
-          display_height_px: itd.display_height,
-          ...(itd.display_number !== undefined && { display_number: itd.display_number }),
-        };
-
-      case 'vnd.ant.tools.text_editor_20241022':
-        return {
-          type: 'text_editor_20241022',
-          name: 'str_replace_editor',
-        };
-
-      case 'vnd.ant.tools.bash_20241022':
-        return {
-          type: 'bash_20241022',
-          name: 'bash',
-        };
 
     }
   });

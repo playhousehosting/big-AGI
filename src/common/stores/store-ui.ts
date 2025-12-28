@@ -48,6 +48,12 @@ interface UIPreferencesStore {
   showModelsHidden: boolean;
   setShowModelsHidden: (showModelsHidden: boolean) => void;
 
+  showModelsStarredOnly: boolean;
+  toggleShowModelsStarredOnly: () => void;
+
+  modelsStarredOnTop: boolean;
+  setModelsStarredOnTop: (modelsStarredOnTop: boolean) => void;
+
   composerQuickButton: 'off' | 'call' | 'beam';
   setComposerQuickButton: (composerQuickButton: 'off' | 'call' | 'beam') => void;
 
@@ -66,6 +72,11 @@ interface UIPreferencesStore {
   actionCounters: Record<string, number>;
   incrementActionCounter: (key: string) => void;
   resetActionCounter: (key: string) => void;
+
+  // Optima Panel Grouped List Collapse States
+
+  panelGroupCollapseStates: Record<string, boolean>;
+  setPanelGroupCollapsed: (key: string, collapsed: boolean) => void;
 
 }
 
@@ -112,6 +123,12 @@ export const useUIPreferencesStore = create<UIPreferencesStore>()(
       showModelsHidden: false,
       setShowModelsHidden: (showModelsHidden: boolean) => set({ showModelsHidden }),
 
+      showModelsStarredOnly: false,
+      toggleShowModelsStarredOnly: () => set((state) => ({ showModelsStarredOnly: !state.showModelsStarredOnly })),
+
+      modelsStarredOnTop: true,
+      setModelsStarredOnTop: (modelsStarredOnTop: boolean) => set({ modelsStarredOnTop }),
+
       composerQuickButton: 'beam',
       setComposerQuickButton: (composerQuickButton: 'off' | 'call' | 'beam') => set({ composerQuickButton }),
 
@@ -137,6 +154,14 @@ export const useUIPreferencesStore = create<UIPreferencesStore>()(
       resetActionCounter: (key: string) =>
         set((state) => ({
           actionCounters: { ...state.actionCounters, [key]: 0 },
+        })),
+
+      // Panel Grouped List Collapse States
+
+      panelGroupCollapseStates: {},
+      setPanelGroupCollapsed: (key: string, collapsed: boolean) =>
+        set((state) => ({
+          panelGroupCollapseStates: { ...state.panelGroupCollapseStates, [key]: collapsed },
         })),
 
     }),
@@ -193,7 +218,7 @@ export function useUIContentScaling(): ContentScaling {
   return useUIPreferencesStore((state) => state.contentScaling);
 }
 
-export function getAixInspector(): boolean {
+export function getAixInspectorEnabled(): boolean {
   return useUIPreferencesStore.getState().aixInspector;
 }
 
@@ -207,10 +232,20 @@ export function uiSetDismissed(key: string): void {
 }
 
 
+export function useUIPanelGroupCollapsed(key: string | null): boolean | undefined {
+  return useUIPreferencesStore((state) => !key ? undefined : state.panelGroupCollapseStates[key]);
+}
+
+export function uiSetPanelGroupCollapsed(key: string, collapsed: boolean): void {
+  useUIPreferencesStore.getState().setPanelGroupCollapsed(key, collapsed);
+}
+
+
 // former:
 //  'export-share'                    // used the export function
 //  'share-chat-link'                 // not shared a Chat Link yet
 type KnownKeys =
+  | 'acknowledge-pwa-desktop-mode-warning' // displayed if mobile PWA is in desktop mode (layout issues)
   | 'acknowledge-translation-warning' // displayed if Chrome is translating the page (may crash)
   | 'beam-wizard'                     // first Beam
   | 'call-wizard'                     // first Call
