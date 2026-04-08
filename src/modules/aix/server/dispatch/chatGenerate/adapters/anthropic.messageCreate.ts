@@ -1,3 +1,7 @@
+import * as z from 'zod/v4';
+
+import type { AnthropicHostedFeatures } from '~/modules/llms/server/anthropic/anthropic.access';
+
 import type { AixAPI_Model, AixAPIChatGenerate_Request, AixMessages_ChatMessage, AixTools_ToolDefinition, AixTools_ToolsPolicy } from '../../../api/aix.wiretypes';
 import { AnthropicWire_API_Message_Create, AnthropicWire_Blocks } from '../../wiretypes/anthropic.wiretypes';
 
@@ -5,9 +9,13 @@ import { aixSpillShallFlush, aixSpillSystemToUser, approxDocPart_To_String, appr
 
 
 // configuration
+// const DEFAULT_WEB_FETCH_MAX_USES = 5; // we don't set a default anymore, we let it be
+// const DEFAULT_WEB_SEARCH_MAX_USES = 10; // we don't set a default anymore, we let it be
 const hotFixImagePartsFirst = true;
 const hotFixMapModelImagesToUser = true;
 const hotFixDisableThinkingWhenToolsForced = true; // "Thinking may not be enabled when tool_choice forces tool use."
+const hotFixAntSeparateContiguousThinkingBlocks = true; // Interleave continuous thinking blocks (without aText) with the following text block, instead of merging them into a single block - should be more robust to unexpected thinking block formats and to changes in the thinking block format, as we have seen some variations and we might see more in the future
+// const hotFixAntShipNoEmptyTextBlocks = true; // If empty text blocks are found (e.g. produced by the API), do not ship them or things will break
 
 // former fixes, now removed
 // const hackyHotFixStartWithUser = false; // 2024-10-22: no longer required
@@ -15,7 +23,41 @@ const hotFixDisableThinkingWhenToolsForced = true; // "Thinking may not be enabl
 
 type TRequest = AnthropicWire_API_Message_Create.Request;
 
-export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: AixAPIChatGenerate_Request, streaming: boolean): TRequest {
+
+/**
+ * Determines which Anthropic hosted features will be active for a request.
+ * Single source of truth for both the request builder (tools, container) and the dispatch (beta headers).
+ */
+export function aixAnthropicHostedFeatures(model: AixAPI_Model, chatGenerate: AixAPIChatGenerate_Request): AnthropicHostedFeatures {
+
+  // Allow/deny auto-adding hosted tools when custom tools are present with a restrictive policy
+  const _hasAixCustomTools = chatGenerate.tools?.some(t => t.type === 'function_call');
+  const _hasAixToolRestrictivePolicy = chatGenerate.toolsPolicy?.type === 'any' || chatGenerate.toolsPolicy?.type === 'function_call';
+
+  // Dynamic web tools (20260209) require code execution for programmatic tool calling
+  const hasDynamicWebTools = model.vndAntWebDynamic === true && (model.vndAntWebSearch === 'auto' || model.vndAntWebFetch === 'auto');
+
+  // Programmatic Tool Calling - tools with allowed_callers or input_examples
+  const programmaticToolCalling = chatGenerate.tools?.some(tool =>
+    tool.type === 'function_call' && (
+      tool.function_call.allowed_callers?.includes('code_execution') ||
+      (tool.function_call.input_examples && tool.function_call.input_examples.length > 0)
+    ),
+  ) ?? false;
+
+  return {
+    disableAllHostedTools: !!(_hasAixCustomTools && _hasAixToolRestrictivePolicy),
+    enable1MContext: model.vndAnt1MContext === true,
+    enableCodeExecution: !!model.vndAntSkills || !!model.vndAntContainerId || hasDynamicWebTools || programmaticToolCalling,
+    enableFastMode: model.vndAntInfSpeed === 'fast',
+    enableSkills: !!model.vndAntSkills,
+    enableStrictOutputs: !!model.strictJsonOutput || !!model.strictToolInvocations,
+    enableToolAdvanced20251120: !!model.vndAntToolSearch || programmaticToolCalling,
+    modelIdForPerModelFeatures: model.id,
+  };
+}
+
+export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: AixAPIChatGenerate_Request, streaming: boolean, hostedFeatures: ReturnType<typeof aixAnthropicHostedFeatures>): TRequest {
 
   // Pre-process CGR - approximate spill of System to User message
   const chatGenerate = aixSpillSystemToUser(_chatGenerate);
@@ -27,11 +69,11 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
       switch (part.pt) {
 
         case 'text':
-          acc.push(AnthropicWire_Blocks.TextBlock(part.text));
+          acc.push(AnthropicWire_Blocks.TextBlock(part.text, 'system.text'));
           break;
 
         case 'doc':
-          acc.push(AnthropicWire_Blocks.TextBlock(approxDocPart_To_String(part)));
+          acc.push(AnthropicWire_Blocks.TextBlock(approxDocPart_To_String(part), 'system.doc'));
           break;
 
         case 'inline_image':
@@ -83,6 +125,18 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
           chatMessages.push(currentMessage);
         currentMessage = { role, content: [] };
       }
+
+      // Hotfix Opus-4.6: a new thinking block cannot follow a thinking or redacted_thinking block directly
+      // (redacted_thinking after thinking is fine - that's the normal pattern)
+      if (hotFixAntSeparateContiguousThinkingBlocks && content.type === 'thinking' && currentMessage.content.length) {
+        const lastBlock = currentMessage.content[currentMessage.content.length - 1];
+        if (lastBlock.type === 'thinking' || lastBlock.type === 'redacted_thinking') {
+          // FIXME: this happens because some intermediate 'tool requests + responses' may have been skipped, so thinking messages became contiguous
+          console.log(`[DEV] Anthropic: 🔷 Separating contiguous ${lastBlock.type} -> thinking with text separator`);
+          currentMessage.content.push(AnthropicWire_Blocks.TextBlock('\n', 'hotfix.thinking-separator'));
+        }
+      }
+
       currentMessage.content.push(content);
     }
 
@@ -130,66 +184,91 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
     delete payload.temperature;
   }
 
-  // [Anthropic] Thinking Budget
+  // [Anthropic] Thinking: adaptive (4.6+), enabled with budget (≤4.5), or disabled
   const areToolCallsRequired = payload.tool_choice && typeof payload.tool_choice === 'object' && (payload.tool_choice.type === 'any' || payload.tool_choice.type === 'tool');
   const canUseThinking = !areToolCallsRequired || !hotFixDisableThinkingWhenToolsForced;
   if (model.vndAntThinkingBudget !== undefined && canUseThinking) {
-    payload.thinking = model.vndAntThinkingBudget !== null ? {
-      type: 'enabled',
-      budget_tokens: model.vndAntThinkingBudget < payload.max_tokens ? model.vndAntThinkingBudget : payload.max_tokens - 1,
-    } : {
-      type: 'disabled',
-    };
-    delete payload.temperature;
+    if (model.vndAntThinkingBudget === 'adaptive') {
+      payload.thinking = {
+        type: 'adaptive',
+        // display: 'summarized', // default, use 'omitted' to not include it and stream faster while preserving the signature
+      };
+      delete payload.temperature;
+    } else if (model.vndAntThinkingBudget !== null) {
+      payload.thinking = {
+        type: 'enabled',
+        budget_tokens: model.vndAntThinkingBudget < payload.max_tokens ? model.vndAntThinkingBudget : payload.max_tokens - 1,
+        // display: 'summarized', // default, use 'omitted' to not include it and stream faster while preserving the signature
+      };
+      delete payload.temperature;
+    } else {
+      payload.thinking = {
+        type: 'disabled',
+      };
+      // NOTE: with thinking disabled, we can still use temperature, so we don't delete it
+      //       see the note on llms.parameters.ts: 'llmVndAntThinkingBudget'
+    }
   }
 
   // [Anthropic] Effort parameter [Anthropic, effort-2025-11-24]
-  if (model.vndAntEffort /*&& model.vndAntEffort !== 'high'*/)
+  const reasoningEffort = model.reasoningEffort; // ?? model.vndAntEffort;
+  if (reasoningEffort) {
+    if (reasoningEffort === 'none' || reasoningEffort === 'minimal' || reasoningEffort === 'xhigh') throw new Error(`Anthropic API does not support '${reasoningEffort}' effort level`);
     payload.output_config = {
-      effort: model.vndAntEffort,
+      effort: reasoningEffort,
     };
+  }
 
-  // [Anthropic, 2025-11-13] Structured Outputs - JSON output format
+  // [Anthropic, 2026-01-29 GA] Structured Outputs - JSON output format (now in output_config.format)
   if (model.strictJsonOutput) {
 
     // auto-add additionalProperties: false to root object if not present - required by Anthropic
     let schema = model.strictJsonOutput.schema;
     if (schema && typeof schema === 'object' && schema.type === 'object' && schema.additionalProperties === undefined)
       schema = { ...schema, additionalProperties: false };
-    payload.output_format = { type: 'json_schema', schema };
+    payload.output_config = {
+      ...payload.output_config,
+      format: { type: 'json_schema', schema },
+    };
 
     // warn about incompatible features (citations are enabled via web_fetch tool)
     if (model.vndAntWebFetch === 'auto')
-      console.warn('[Anthropic] Structured output_format may conflict with web_fetch citations');
+      console.warn('[Anthropic] Structured output_config.format may conflict with web_fetch citations');
   }
+
+  // [Anthropic, fast-mode-2026-02-01] Fast inference mode (preview/waitlist)
+  if (model.vndAntInfSpeed === 'fast')
+    payload.speed = 'fast';
+
 
   // --- Tools ---
 
-  // Allow/deny auto-adding hosted tools when custom tools are present
-  const hasCustomTools = chatGenerate.tools?.some(t => t.type === 'function_call');
-  const hasRestrictivePolicy = chatGenerate.toolsPolicy?.type === 'any' || chatGenerate.toolsPolicy?.type === 'function_call';
-  const skipHostedToolsDueToCustomTools = hasCustomTools && hasRestrictivePolicy;
+  // Hosted capabilities - shared logic with dispatch for beta header correctness
+  const { disableAllHostedTools, enableCodeExecution } = hostedFeatures;
 
   // Hosted tools
-  if (!skipHostedToolsDueToCustomTools) {
+  if (!disableAllHostedTools) {
     const hostedTools: NonNullable<TRequest['tools']> = [];
 
-    // Web Search Tool
+    // Web Search Tool - dynamic filtering (20260209) uses internal code execution for better results
     if (model.vndAntWebSearch === 'auto') {
       hostedTools.push({
-        type: 'web_search_20250305',
+        type: model.vndAntWebDynamic ? 'web_search_20260209' : 'web_search_20250305',
         name: 'web_search',
-        max_uses: 10, // Allow up to 10 progressive searches // FIXME: HARDCODED
+        ...(model.vndAntWebSearchMaxUses !== undefined ? { max_uses: model.vndAntWebSearchMaxUses } : {}),
+        ...(model.userGeolocation ? {
+          user_location: { type: 'approximate' as const, ...model.userGeolocation },
+        } : {}),
       });
     }
 
-    // Web Fetch Tool
+    // Web Fetch Tool - dynamic filtering (20260209) uses internal code execution for better results
     if (model.vndAntWebFetch === 'auto') {
       hostedTools.push({
-        type: 'web_fetch_20250910',
+        type: model.vndAntWebDynamic ? 'web_fetch_20260209' : 'web_fetch_20250910',
         name: 'web_fetch',
-        max_uses: 5, // Allow up to 5 fetches
-        citations: { enabled: true }, // Enable citations
+        ...(model.vndAntWebFetchMaxUses !== undefined ? { max_uses: model.vndAntWebFetchMaxUses } : {}),
+        citations: { enabled: true },
       });
     }
 
@@ -205,46 +284,44 @@ export function aixToAnthropicMessageCreate(model: AixAPI_Model, _chatGenerate: 
         name: 'tool_search_tool_bm25',
       });
 
+    // Code Execution tool - required for dynamic filtering, Skills, etc.
+    if (enableCodeExecution)
+      hostedTools.push({ type: 'code_execution_20260120', name: 'code_execution' });
+
     // Merge hosted tools with custom tools
     if (hostedTools.length > 0) {
       payload.tools = payload.tools ? [...payload.tools, ...hostedTools] : hostedTools;
     }
   }
 
-  // --- Skills Container ---
+  // --- Container - for code execution (Skills, dynamic filtering, etc.) continuity between calls ---
 
-  // Add Skills container if enabled (non-empty string)
-  if (model.vndAntSkills) {
+  if (enableCodeExecution) {
 
-    // Parse comma-separated string and convert to Anthropic format
-    const skillIds = model.vndAntSkills.split(',').map((s: string) => s.trim()).filter((s: string) => s);
+    // Container ID from a previous turn (expiry already checked client-side)
+    const containerId = model.vndAntContainerId;
 
-    if (skillIds.length > 0) {
-
-      // request a container with those selected skills
+    const skillIds = model.vndAntSkills?.split(',').map(s => s.trim()).filter(s => s);
+    if (skillIds?.length) {
+      // Reuse or create a container for the skills
       payload.container = {
-        skills: skillIds.map((skillId: string) => ({
-          type: 'anthropic' as const,
+        ...(containerId ? { id: containerId } : {}),
+        skills: skillIds.map((skillId: string) => ({ 
+          type: 'anthropic',
           skill_id: skillId,
           version: 'latest',
         })),
       };
-
-      // also require the code_execution tool (required by Skills)
-      if (!payload.tools?.length)
-        payload.tools = [];
-
-      if (!payload.tools.some(t => t.type === 'code_execution_20250825'))
-        payload.tools.push({ type: 'code_execution_20250825', name: 'code_execution' });
-    }
+    } else if (containerId)
+      payload.container = containerId;
   }
 
 
   // Preemptive error detection with server-side payload validation before sending it upstream
   const validated = AnthropicWire_API_Message_Create.Request_schema.safeParse(payload);
   if (!validated.success) {
-    console.error('Anthropic: invalid messageCreate payload. Error:', validated.error.message);
-    throw new Error(`Invalid sequence for Anthropic models: ${validated.error.issues?.[0]?.message || validated.error.message || validated.error}.`);
+    console.warn('[DEV] Anthropic: invalid messageCreate payload. Error:', { valError: validated.error });
+    throw new Error(`Invalid request for Anthropic models: ${z.prettifyError(validated.error)}`);
   }
 
   return validated.data;
@@ -274,7 +351,7 @@ function* _generateAnthropicMessagesContentBlocks({ parts, role }: AixMessages_C
         switch (part.pt) {
 
           case 'text':
-            yield { role: 'user', content: AnthropicWire_Blocks.TextBlock(part.text) };
+            yield { role: 'user', content: AnthropicWire_Blocks.TextBlock(part.text, 'user.text') };
             break;
 
           case 'inline_image':
@@ -282,13 +359,13 @@ function* _generateAnthropicMessagesContentBlocks({ parts, role }: AixMessages_C
             break;
 
           case 'doc':
-            yield { role: 'user', content: AnthropicWire_Blocks.TextBlock(approxDocPart_To_String(part)) };
+            yield { role: 'user', content: AnthropicWire_Blocks.TextBlock(approxDocPart_To_String(part), 'user.doc') };
             break;
 
           case 'meta_in_reference_to':
             const irtXMLString = approxInReferenceTo_To_XMLString(part);
             if (irtXMLString)
-              yield { role: 'user', content: AnthropicWire_Blocks.TextBlock(irtXMLString) };
+              yield { role: 'user', content: AnthropicWire_Blocks.TextBlock(irtXMLString, 'user.irt') };
             break;
 
           case 'meta_cache_control':
@@ -306,7 +383,7 @@ function* _generateAnthropicMessagesContentBlocks({ parts, role }: AixMessages_C
         switch (part.pt) {
 
           case 'text':
-            yield { role: 'assistant', content: AnthropicWire_Blocks.TextBlock(part.text) };
+            yield { role: 'assistant', content: AnthropicWire_Blocks.TextBlock(part.text, 'model.text') };
             break;
 
           case 'inline_audio':
@@ -346,6 +423,22 @@ function* _generateAnthropicMessagesContentBlocks({ parts, role }: AixMessages_C
               yield { role: 'assistant', content: AnthropicWire_Blocks.RedactedThinkingBlock(redactedData) };
             break;
 
+          case 'tool_response':
+            const toolErrorPrefix = part.error ? (typeof part.error === 'string' ? `[ERROR] ${part.error} - ` : '[ERROR] ') : '';
+            switch (part.response.type) {
+              case 'function_call':
+                const fcTextParts = [AnthropicWire_Blocks.TextBlock(toolErrorPrefix + part.response.result, 'tool.fc_result')];
+                yield { role: 'user', content: AnthropicWire_Blocks.ToolResultBlock(part.id, fcTextParts, part.error ? true : undefined) };
+                break;
+              case 'code_execution':
+                const ceTextParts = [AnthropicWire_Blocks.TextBlock(toolErrorPrefix + part.response.result, 'tool.ce_result')];
+                yield { role: 'user', content: AnthropicWire_Blocks.ToolResultBlock(part.id, ceTextParts, part.error ? true : undefined) };
+                break;
+              default:
+                throw new Error(`Unsupported tool response type in Model message: ${(part as any).pt}`);
+            }
+            break;
+
           case 'meta_cache_control':
             yield { set_cache_control: part.control };
             break;
@@ -353,37 +446,6 @@ function* _generateAnthropicMessagesContentBlocks({ parts, role }: AixMessages_C
           default:
             const _exhaustiveCheck: never = part;
             throw new Error(`Unsupported part type in Model message: ${(part as any).pt}`);
-        }
-      }
-      break;
-
-    case 'tool':
-      for (const part of parts) {
-        switch (part.pt) {
-
-          case 'tool_response':
-            const toolErrorPrefix = part.error ? (typeof part.error === 'string' ? `[ERROR] ${part.error} - ` : '[ERROR] ') : '';
-            switch (part.response.type) {
-              case 'function_call':
-                const fcTextParts = [AnthropicWire_Blocks.TextBlock(toolErrorPrefix + part.response.result)];
-                yield { role: 'user', content: AnthropicWire_Blocks.ToolResultBlock(part.id, fcTextParts, part.error ? true : undefined) };
-                break;
-              case 'code_execution':
-                const ceTextParts = [AnthropicWire_Blocks.TextBlock(toolErrorPrefix + part.response.result)];
-                yield { role: 'user', content: AnthropicWire_Blocks.ToolResultBlock(part.id, ceTextParts, part.error ? true : undefined) };
-                break;
-              default:
-                throw new Error(`Unsupported tool response type in Tool message: ${(part as any).pt}`);
-            }
-            break;
-
-          case 'meta_cache_control':
-            // ignored in tools
-            break;
-
-          default:
-            const _exhaustiveCheck: never = part;
-            throw new Error(`Unsupported part type in Tool message: ${(part as any).pt}`);
         }
       }
       break;
@@ -412,7 +474,7 @@ function _toAnthropicTools(itds: AixTools_ToolDefinition[], strictToolsEnabled: 
           // [Anthropic, 2025-11-24] Tool Search Tool - auto-defer all custom tools
           ...(toolSearchToolEnabled ? { defer_loading: true } : {}),
           // [Anthropic, 2025-11-24] Programmatic Tool Calling - pass through allowed_callers and input_examples
-          ...(allowed_callers ? { allowed_callers: allowed_callers.map(c => c === 'code_execution' ? 'code_execution_20250825' : c) } : {}),
+          ...(allowed_callers ? { allowed_callers: allowed_callers.map(c => c === 'code_execution' ? 'code_execution_20260120' : c) } : {}),
           ...(input_examples ? { input_examples } : {}),
         };
 

@@ -14,6 +14,7 @@ import type { ChatMessageTextPartEditState } from '../ChatMessage';
 import { BlockEdit_TextFragment } from './BlockEdit_TextFragment';
 import { BlockOpEmpty } from './BlockOpEmpty';
 import { BlockPartError } from './BlockPartError';
+import { BlockPartHostedResource } from './BlockPartHostedResource';
 import { BlockPartImageRef } from './BlockPartImageRef';
 import { BlockPartModelAux } from '../fragments-void/BlockPartModelAux';
 import { BlockPartPlaceholder } from '../fragments-void/BlockPartPlaceholder';
@@ -59,7 +60,6 @@ export function ContentFragments(props: {
   messageGeneratorLlmId?: string | null,
   optiAllowSubBlocksMemo?: boolean,
   disableMarkdownText: boolean,
-  enhanceCodeBlocks: boolean,
   showUnsafeHtmlCode?: boolean,
 
   textEditsState: ChatMessageTextPartEditState | null,
@@ -87,6 +87,7 @@ export function ContentFragments(props: {
   // solo placeholder - dataStreamViz trigger
   const showDataStreamViz =
     !Release.Features.LIGHTER_ANIMATIONS
+    && !!props.messagePendingIncomplete // if generating
     && props.uiComplexityMode !== 'minimal'
     && props.contentFragments.length === 1
     // && props.noVoidFragments // not needed, we have all the interleaved fragments here
@@ -96,7 +97,17 @@ export function ContentFragments(props: {
   // Content Fragments Edit Zero-State: button to create a new TextContentFragment
   if (isEditingText && !props.contentFragments.some(isTextContentFragment))
     return !props.onFragmentAddBlank ? null : (
-      <Button aria-label='message body empty' variant='plain' color='neutral' onClick={props.onFragmentAddBlank} sx={{ justifyContent: 'flex-start' }}>
+      <Button
+        aria-label='message body empty'
+        color={fromAssistant ? 'neutral' : 'primary'}
+        variant='outlined'
+        onClick={props.onFragmentAddBlank}
+        sx={{
+          justifyContent: 'flex-start',
+          backgroundColor: fromAssistant ? 'neutral.softBg' : 'primary.softBg',
+          '&:hover': { backgroundColor: fromAssistant ? 'neutral.softHoverBg' : 'primary.softHoverBg' },
+        }}
+      >
         add text ...
       </Button>
     );
@@ -157,14 +168,13 @@ export function ContentFragments(props: {
             return (
               <BlockPartPlaceholder
                 key={fId}
-                placeholderText={part.pText}
-                placeholderType={part.pType}
-                placeholderModelOp={part.modelOp}
-                placeholderAixControl={part.aixControl}
-                messageRole={props.messageRole}
+                fragmentId={fId}
+                placeholderPart={part}
                 contentScaling={props.contentScaling}
-                showAsItalic
+                messagePendingIncomplete={!!props.messagePendingIncomplete}
                 showAsDataStreamViz={showDataStreamViz}
+                zenMode={props.uiComplexityMode === 'minimal'}
+                onFragmentDelete={props.messagePendingIncomplete ? undefined : props.onFragmentDelete}
               />
             );
 
@@ -323,7 +333,6 @@ export function ContentFragments(props: {
               fitScreen={props.fitScreen}
               isMobile={props.isMobile}
               disableMarkdownText={props.disableMarkdownText}
-              enhanceCodeBlocks={props.enhanceCodeBlocks}
               // renderWordsDiff={wordsDiff || undefined}
               showUnsafeHtmlCode={props.showUnsafeHtmlCode}
               optiAllowSubBlocksMemo={!!props.optiAllowSubBlocksMemo}
@@ -349,6 +358,18 @@ export function ContentFragments(props: {
               toolResponsePart={part}
               contentScaling={props.contentScaling}
               onDoubleClick={props.onDoubleClick}
+            />
+          );
+
+        case 'hosted_resource':
+          return (
+            <BlockPartHostedResource
+              key={fId}
+              hostedResourcePart={part}
+              fragmentId={fId}
+              messageGeneratorLlmId={props.messageGeneratorLlmId}
+              contentScaling={props.contentScaling}
+              onFragmentDelete={props.onFragmentDelete}
             />
           );
 

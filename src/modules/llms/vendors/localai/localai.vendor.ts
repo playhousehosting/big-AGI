@@ -39,7 +39,6 @@ export const ModelVendorLocalAI: IModelVendor<DLocalAIServiceSettings, OpenAIAcc
     oaiOrg: '',
     oaiHost: partialSetup?.localAIHost || '',
     heliKey: '',
-    moderationCheck: false,
   }),
 
   // OpenAI transport ('localai' dialect in 'access')
@@ -47,6 +46,8 @@ export const ModelVendorLocalAI: IModelVendor<DLocalAIServiceSettings, OpenAIAcc
 
 };
 
-function _csfLocalAIAvailable(s?: Partial<DLocalAIServiceSettings>) {
-  return !!s?.localAIHost;
+function _csfLocalAIAvailable(_s?: Partial<DLocalAIServiceSettings>) {
+  // always available for local vendors - CSF falls back to DEFAULT_LOCALAI_HOST (http://127.0.0.1:8080)
+  // was: return !!s?.localAIHost;
+  return true;
 }

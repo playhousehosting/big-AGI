@@ -70,7 +70,7 @@ const tooltipCreationTimeSx: SxProps = {
   color: 'text.tertiary',
 };
 
-const tooltipMetricsGridSx: SxProps = {
+export const tooltipMetricsGridSx: SxProps = {
   // grid of 2 columns, the first fits the labels, the other expends with the values
   display: 'grid',
   gridTemplateColumns: 'auto 1fr',
@@ -205,7 +205,7 @@ export function useMessageAvatarLabel(
 
   // OPTIMIZATION - THIS COULD BACKFIRE - THE ICON MAY NOT BE UPDATED AS OFTEN AS WE NEED
   // -> we will only trigger updates on: updated, pendingIncomplete changes, name changes
-  // generator will change at every step (due to some structuredClone in AIX); we choose to 'lag' behind it and
+  // generator ref changes during streaming (new ref per update); we 'lag' behind it and
   // refresh this when other variables change
   const laggedGeneratorRef = React.useRef<DMessageGenerator | undefined>(undefined);
   laggedGeneratorRef.current = generator;
@@ -249,8 +249,8 @@ export function useMessageAvatarLabel(
     const modelId = generator.aix?.mId ?? null;
     const vendorId = generator.aix?.vId ?? null;
     const VendorIcon = (vendorId && complexity !== 'minimal') ? llmsGetVendorIcon(vendorId) : null;
-    const metrics = generator.metrics ? _prettyMetrics(generator.metrics, complexity) : null;
-    const stopReason = generator.tokenStopReason ? _prettyTokenStopReason(generator.tokenStopReason, complexity) : null;
+    const metrics = generator.metrics ? prettyMessageMetrics(generator.metrics, complexity) : null;
+    const stopReason = generator.tokenStopReason ? prettyTokenStopReason(generator.tokenStopReason, complexity) : null;
 
     // aix tooltip: more details
     return {
@@ -258,6 +258,7 @@ export function useMessageAvatarLabel(
       tooltip: complexity === 'minimal' ? null : (
         <Box sx={tooltipSx}>
           {VendorIcon ? <Box sx={tooltipIconContainerSx}><VendorIcon />{generator.name}</Box> : <div>{generator.name}</div>}
+          {generator.providerInfraLabel && <div>{vendorId} -&gt; via &lsquo;{generator.providerInfraLabel}&rsquo;</div>}
           {(modelId && complexity === 'extra') && <div>{modelId}</div>}
           {metrics && <div>{metrics}</div>}
           {stopReason && <div>{stopReason}</div>}
@@ -268,7 +269,8 @@ export function useMessageAvatarLabel(
   }, [complexity, created, generatorName, pendingIncomplete, updated]);
 }
 
-function _prettyMetrics(metrics: DMessageGenerator['metrics'], uiComplexityMode: UIComplexityMode): React.ReactNode {
+/** Renders chat generation metrics as a grid. Exported for reuse in message info popup. */
+export function prettyMessageMetrics(metrics: DMessageGenerator['metrics'], uiComplexityMode: UIComplexityMode): React.ReactNode {
   if (!metrics) return null;
 
   const showWaitingTime = metrics?.dtStart !== undefined && (uiComplexityMode === 'extra' || metrics.dtStart >= 10000);
@@ -343,7 +345,7 @@ function _prettyCostCode(code: MetricsChatGenerateCost_Md['$code']): string | nu
   }
 }
 
-function _prettyTokenStopReason(reason: DMessageGenerator['tokenStopReason'], complexity: UIComplexityMode): string | null {
+export function prettyTokenStopReason(reason: DMessageGenerator['tokenStopReason'], complexity: UIComplexityMode): string | null {
   if (!reason) return null;
   switch (reason) {
     case 'client-abort':
@@ -361,7 +363,7 @@ function _prettyTokenStopReason(reason: DMessageGenerator['tokenStopReason'], co
 }
 
 
-const oaiORegex = /gpt-[345](?:o|\.\d+)?-|o[1345]-|chatgpt-[45]o?|gpt-5-chat|computer-use-/;
+const oaiORegex = /gpt-[345](?:o|\.\d+)?-|o[1345]-|osb-|chatgpt-[45]o?|gpt-5-chat|computer-use-/;
 const geminiRegex = /gemini-|gemma-|learnlm-/;
 
 
@@ -382,6 +384,7 @@ export function prettyShortChatModelName(model: string | undefined): string {
       .replace('chatgpt-', 'ChatGPT_')
       .replace('gpt-5-chat-', 'ChatGPT-5 ')
       .replace('gpt-', 'GPT_')
+      .replace('osb-', 'OSB_')
       // feature variants
       .replace('-audio', ' Audio')
       .replace('-realtime-preview', ' Realtime')
@@ -493,6 +496,20 @@ export function prettyShortChatModelName(model: string | undefined): string {
     if (model.includes('grok-beta')) return 'Grok Beta';
     if (model.includes('grok-vision-beta')) return 'Grok Vision Beta';
   }
+  // [Z.ai]
+  if (model.startsWith('glm-')) {
+    return model
+      .replace('glm-', 'GLM-')
+      .replace('ocr', 'OCR')
+      .replace(/(\d)v/, '$1 V')   // vision suffix: 4.6v → 4.6 V
+      .replace('-flashx', ' FlashX')
+      .replace('-flash', ' Flash')
+      .replace('-airx', ' AirX')
+      .replace('-air', ' Air')
+      .replace('-code', ' Code')
+      .replace(/-x$/, ' X')
+      .replace(/-32b.*$/, ' 32B');
+  }
   // [FireworksAI]
   if (model.includes('accounts/')) {
     const index = model.indexOf('accounts/');
@@ -518,18 +535,19 @@ function _prettyAnthropicModelName(modelId: string): string | null {
 
   const subStr = modelId.slice(claudeIndex);
   const version =
-    subStr.includes('-4-5') ? '4.5' // fixes the -5
-      : subStr.includes('-3-5') ? '3.5' // fixes the -5
-        : subStr.includes('-5') ? '5'
-          : subStr.includes('-4-1') ? '4.1'
-            : subStr.includes('-4') ? '4'
-              : subStr.includes('-3-7') ? '3.7'
-                : subStr.includes('-3') ? '3'
-                  : '?';
+    subStr.includes('-4-6') ? '4.6'
+      : subStr.includes('-4-5') ? '4.5' // fixes the -5
+        : subStr.includes('-3-5') ? '3.5' // fixes the -5
+          : subStr.includes('-5') ? '5'
+            : subStr.includes('-4-1') ? '4.1'
+              : subStr.includes('-4') ? '4'
+                : subStr.includes('-3-7') ? '3.7'
+                  : subStr.includes('-3') ? '3'
+                    : '?';
 
-  if (subStr.includes(`-opus`)) return `Claude ${version} Opus`;
-  if (subStr.includes(`-sonnet`)) return `Claude ${version} Sonnet`;
-  if (subStr.includes(`-haiku`)) return `Claude ${version} Haiku`;
+  if (subStr.includes(`-opus`)) return `Claude Opus ${version}`;
+  if (subStr.includes(`-sonnet`)) return `Claude Sonnet ${version}`;
+  if (subStr.includes(`-haiku`)) return `Claude Haiku ${version}`;
 
   return `Claude ${version}`;
 }

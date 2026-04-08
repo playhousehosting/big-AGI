@@ -4,6 +4,7 @@ import * as z from 'zod/v4';
 import type { DMessageToolResponsePart } from '~/common/stores/chat/chat.fragments';
 
 import { anthropicAccessSchema } from '~/modules/llms/server/anthropic/anthropic.access';
+import { bedrockAccessSchema } from '~/modules/llms/server/bedrock/bedrock.access';
 import { geminiAccessSchema } from '~/modules/llms/server/gemini/gemini.access';
 import { ollamaAccessSchema } from '~/modules/llms/server/ollama/ollama.access';
 import { openAIAccessSchema } from '~/modules/llms/server/openai/openai.access';
@@ -26,7 +27,6 @@ export type AixParts_MetaInReferenceToPart = z.infer<typeof AixWire_Parts.MetaIn
 
 export type AixMessages_SystemMessage = z.infer<typeof AixWire_Content.SystemInstruction_schema>;
 export type AixMessages_ModelMessage = z.infer<typeof AixWire_Content.ModelMessage_schema>;
-export type AixMessages_ToolMessage = z.infer<typeof AixWire_Content.ToolMessage_schema>;
 export type AixMessages_UserMessage = z.infer<typeof AixWire_Content.UserMessage_schema>;
 export type AixMessages_ChatMessage = z.infer<typeof AixWire_Content.ChatMessage_schema>;
 
@@ -101,6 +101,13 @@ export namespace AixWire_Parts {
       gemini: z.object({
         thoughtSignature: z.string().optional(),
       }).optional(),
+      // NOTE: we do NOT use this mechanism for per-vendor customization/ALT for parts
+      // anthropic: z.object({
+      //   containerUpload: z.object({
+      //     fileId: z.string(),
+      //     containerId: z.string().optional(),
+      //   }).optional(),
+      // }).optional(),
     }).optional(),
     // _vnd: z.record(z.string(), z.unknown()).optional(),
 
@@ -178,7 +185,7 @@ export namespace AixWire_Parts {
 
   const _FunctionCallInvocation_schema = z.object({
     type: z.literal('function_call'),
-    name: z.string(),
+    name: z.string(), // function name
     args: z.string(), //.nullable(), // 2024-11-03: disabled .nullable(), as we'll use '' for no args (which some APIs weirdly don't support so we'll mock downstream as '{}')
     // _description: z.string().optional(),
     // _args_schema: z.object({}).optional(),
@@ -186,7 +193,7 @@ export namespace AixWire_Parts {
 
   const _CodeExecutionInvocation_schema = z.object({
     type: z.literal('code_execution'),
-    variant: z.literal('gemini_auto_inline').optional(),
+    variant: z.enum(['gemini_auto_inline', 'code_interpreter']).optional(),
     language: z.string().optional(),
     code: z.string(),
   });
@@ -205,7 +212,12 @@ export namespace AixWire_Parts {
   const _FunctionCallResponse_schema = z.object({
     type: z.literal('function_call'),
     result: z.string(),
-    _name: z.string().optional(),
+    /**
+     * Function name of the response
+     * - for Gemini this must match the _FunctionCallDeclaration.name
+     * - other APIs usually match the id (of the parent ToolResponsePart) to the ID of the call
+     */
+    name: z.string(),
   });
 
   const _CodeExecutionResponse_schema = z.object({
@@ -288,15 +300,8 @@ export namespace AixWire_Content {
       AixWire_Parts.InlineAudioPart_schema,
       AixWire_Parts.InlineImagePart_schema,
       AixWire_Parts.ToolInvocationPart_schema,
-      AixWire_Parts.ModelAuxPart_schema,
-      AixWire_Parts.MetaCacheControl_schema,
-    ])),
-  });
-
-  export const ToolMessage_schema = z.object({
-    role: z.literal('tool'),
-    parts: z.array(z.discriminatedUnion('pt', [
       AixWire_Parts.ToolResponsePart_schema,
+      AixWire_Parts.ModelAuxPart_schema,
       AixWire_Parts.MetaCacheControl_schema,
     ])),
   });
@@ -304,7 +309,6 @@ export namespace AixWire_Content {
   export const ChatMessage_schema = z.discriminatedUnion('role', [
     UserMessage_schema,
     ModelMessage_schema,
-    ToolMessage_schema,
   ]);
 
 }
@@ -313,7 +317,7 @@ export namespace AixWire_Tooling {
 
   /// Function Call Tool Definition
 
-  const _FunctionCall_schema = z.object({
+  const _FunctionCallDeclaration_schema = z.object({
     /**
      * The name of the function to call. Up to 64 characters long, and can only contain letters, numbers, underscores, and hyphens.
      */
@@ -348,7 +352,7 @@ export namespace AixWire_Tooling {
 
   const _FunctionCallTool_schema = z.object({
     type: z.literal('function_call'),
-    function_call: _FunctionCall_schema,
+    function_call: _FunctionCallDeclaration_schema,
     // domain: z.enum(['server', 'client']).optional(),
   });
 
@@ -360,7 +364,7 @@ export namespace AixWire_Tooling {
      * For now we are supporting a single provider:
      * - gemini_auto_inline: Google Gemini, auto-invoked, and inline (runs the code and goes back to the model to continue the generation)
      */
-    variant: z.enum(['gemini_auto_inline']),
+    variant: z.enum(['gemini_auto_inline', 'code_interpreter']),
   });
 
   /// Tool Definition
@@ -415,6 +419,7 @@ export namespace AixWire_API {
 
   export const Access_schema = z.discriminatedUnion('dialect', [
     anthropicAccessSchema,
+    bedrockAccessSchema,
     geminiAccessSchema,
     ollamaAccessSchema,
     openAIAccessSchema,
@@ -430,8 +435,6 @@ export namespace AixWire_API {
     maxTokens: z.number().min(1).optional(),
     topP: z.number().min(0).max(1).optional(),
     forceNoStream: z.boolean().optional(),
-
-    // Cross-vendor Structured Outputs
 
     /**
      * Constrain model response to a JSON schema for data extraction. Response will be valid JSON. Schema limitations vary by vendor.
@@ -449,14 +452,48 @@ export namespace AixWire_API {
      */
     strictToolInvocations: z.boolean().optional(),
 
+    /**
+     * [OpenAI, 2025-03-11] This is the generic version of the `web_search_options.user_location` field
+     * This AIX field mimics on purpose: https://platform.openai.com/docs/api-reference/chat/create
+     */
+    userGeolocation: z.object({
+      city: z.string().optional(),      // free text input for the city of the user, e.g. San Francisco.
+      region: z.string().optional(),    // free text input for the reg. of the user the user, e.g. California
+      country: z.string().optional(),   // two-letter ISO country code of the user, e.g. US
+      timezone: z.string().optional(),  // IANA timezone of the user, e.g. America/Los_Angeles
+    }).optional(),
+
+
+    // Cross-provider unified (but with semantic specialization) options
+
+    /**
+     * Union of all the possible reasoning effort values. Different dispatches will validate the
+     * domain (subset) of values they support, but the client can send any of them and let the server handle it.
+     */
+    reasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
+    // REMOVE for 2.0.5: we used to have the parameters below - here for doc purposes only - parsing doesn't break if they are set (backward comp)
+    // vndAntEffort: z.enum(['low', 'medium', 'high', 'max']).optional(),
+    // vndGeminiThinkingLevel: z.enum(['high', 'medium', 'low', 'minimal']).optional(), // new param
+    // vndOaiReasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
+    // vndOaiReasoningSummary: z.enum(['none', 'detailed']).optional(),
+    // vndGeminiShowThoughts: z.boolean().optional(),
+
     // Anthropic
     vndAnt1MContext: z.boolean().optional(),
-    vndAntEffort: z.enum(['low', 'medium', 'high']).optional(),
+    vndAntContainerId: z.string().optional(),
+    vndAntInfSpeed: z.enum(['fast']).optional(),
     vndAntSkills: z.string().optional(),
-    vndAntThinkingBudget: z.number().nullable().optional(),
+    vndAntThinkingBudget: z.number().or(z.literal('adaptive')).nullable().optional(),
     vndAntToolSearch: z.enum(['regex', 'bm25']).optional(), // Tool Search Tool variant
+    vndAntWebDynamic: z.boolean().optional(),
     vndAntWebFetch: z.enum(['auto']).optional(),
+    vndAntWebFetchMaxUses: z.number().int().min(1).max(50).optional(),
     vndAntWebSearch: z.enum(['auto']).optional(),
+    vndAntWebSearchMaxUses: z.number().int().min(1).max(50).optional(),
+
+    // Bedrock
+    vndBedrockAPI: z.enum(['converse', 'invoke-anthropic', 'mantle']).optional(),
+
     // Gemini
     vndGeminiAspectRatio: z.enum(['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9']).optional(),
     vndGeminiCodeExecution: z.enum(['auto']).optional(),
@@ -464,40 +501,34 @@ export namespace AixWire_API {
     vndGeminiGoogleSearch: z.enum(['unfiltered', '1d', '1w', '1m', '6m', '1y']).optional(),
     vndGeminiImageSize: z.enum(['1K', '2K', '4K']).optional(),
     vndGeminiMediaResolution: z.enum(['mr_high', 'mr_medium', 'mr_low']).optional(),
-    vndGeminiShowThoughts: z.boolean().optional(),
-    vndGeminiThinkingBudget: z.number().optional(), // old param
-    // 'medium' will be added when Gemini 3 Flash launches
-    // but we have it below, because we used to have it and we don't want to throw on zod
-    vndGeminiThinkingLevel: z.enum(['high', 'medium', 'low']).optional(), // new param
+    vndGeminiThinkingBudget: z.number().optional(), // -1 for 'adaptive'
     vndGeminiUrlContext: z.enum(['auto']).optional(),
+
     // Moonshot
     vndMoonshotWebSearch: z.enum(['auto']).optional(),
+
     // OpenAI
+    vndOaiCodeInterpreter: z.enum(['off', 'auto']).optional(),
+    vndOaiImageGeneration: z.enum(['mq', 'hq', 'hq_edit', 'hq_png']).optional(),
     vndOaiResponsesAPI: z.boolean().optional(),
-    vndOaiReasoningEffort: z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
     vndOaiRestoreMarkdown: z.boolean().optional(),
     vndOaiVerbosity: z.enum(['low', 'medium', 'high']).optional(),
     vndOaiWebSearchContext: z.enum(['low', 'medium', 'high']).optional(),
-    vndOaiImageGeneration: z.enum(['mq', 'hq', 'hq_edit', 'hq_png']).optional(),
+
     // OpenRouter
     vndOrtWebSearch: z.enum(['auto']).optional(),
+
     // Perplexity
     vndPerplexityDateFilter: z.enum(['unfiltered', '1m', '3m', '6m', '1y']).optional(),
     vndPerplexitySearchMode: z.enum(['default', 'academic']).optional(),
+
     // xAI
-    vndXaiSearchMode: z.enum(['auto', 'on', 'off']).optional(),
-    vndXaiSearchSources: z.string().optional(),
-    vndXaiSearchDateFilter: z.enum(['unfiltered', '1d', '1w', '1m', '6m', '1y']).optional(),
-    /**
-     * [OpenAI, 2025-03-11] This is the generic version of the `web_search_options.user_location` field
-     * This AIX field mimics on purpose: https://platform.openai.com/docs/api-reference/chat/create
-     */
-    userGeolocation: z.object({
-      city: z.string().optional(),      // free text input for the city of the user, e.g. San Francisco.
-      country: z.string().optional(),   // two-letter ISO country code of the user, e.g. US
-      region: z.string().optional(),    // free text input for the reg. of the user the user, e.g. California
-      timezone: z.string().optional(),  // IANA timezone of the user, e.g. America/Los_Angeles
-    }).optional(),
+    vndXaiCodeExecution: z.enum(['off', 'auto']).optional(),
+    vndXaiSearchInterval: z.enum(['unfiltered', '1d', '1w', '1m', '6m', '1y']).optional(),
+    vndXaiWebSearch: z.enum(['off', 'auto']).optional(),
+    vndXaiXSearch: z.enum(['off', 'auto']).optional(),
+    vndXaiXSearchHandles: z.string().optional(),
+
   });
 
   /// Resume Handle
@@ -562,6 +593,11 @@ export namespace AixWire_API {
      * Request profiling data for a streaming call: time spent preparing, connecting, waiting, receiving, etc. Fulfillment is decided by the server, and won't be available on 'production' builds.
      */
     debugProfilePerformance: z.boolean().optional(),
+
+    /**
+     * Applies a JSON override to the dispatch request body.
+     */
+    debugRequestBodyOverride: z.record(z.string(), z.unknown()).optional(),
 
     /**
      * Request a resumable connection, if the model/service supports it.
@@ -630,38 +666,36 @@ export namespace AixWire_Particles {
 
   export type ChatControlOp =
   // | { cg: 'start' } // not really used for now
-    | { cg: 'end', reason: CGEndReason, tokenStopReason: GCTokenStopReason }
+    | { cg: 'end', terminationReason: CGEndReason /* we know why we're sending 'end' */, tokenStopReason?: GCTokenStopReason /* we may or not have gotten a logical token stop reason from the dispatch */ }
     | { cg: 'issue', issueId: CGIssueId, issueText: string }
-    | { cg: 'retry-reset', rScope: 'srv-dispatch' | 'srv-op' | 'cli-ll', rShallClear: boolean, reason: string, attempt: number, maxAttempts: number, delayMs: number, causeHttp?: number, causeConn?: string }
+    | { cg: 'aix-info', ait: 'flow-cont' /* important: establishes a checkpoint */, text: string }
+    | { cg: 'aix-retry-reset', rScope: 'srv-dispatch' | 'srv-op' | 'cli-ll', rClearStrategy: 'none' | 'since-checkpoint' | 'all', reason: string, attempt: number, maxAttempts: number, delayMs: number, causeHttp?: number, causeConn?: string }
     | { cg: 'set-metrics', metrics: CGSelectMetrics }
     | { cg: 'set-model', name: string }
+    | { cg: 'set-provider-infra', label: string }
     | { cg: 'set-upstream-handle', handle: { uht: 'vnd.oai.responses', responseId: string, expiresAt: number | null } }
     | { cg: '_debugDispatchRequest', security: 'dev-env', dispatchRequest: { url: string, headers: string, body: string, bodySize: number } } // may generalize this in the future
     | { cg: '_debugProfiler', measurements: Record<string, number | string>[] };
 
   export type CGEndReason =     // the reason for the end of the chat generation
-    | 'abort-client'            // user aborted before the end of stream
     | 'done-dialect'            // OpenAI signals the '[DONE]' event, or Anthropic sends the 'message_stop' event
     | 'done-dispatch-aborted'   // this shall never see the light of day, as it was a reaction to the intake being aborted first
-    | 'done-dispatch-closed'    // dispatch connection closed
+    | 'done-dispatch-closed'    // dispatch connection closed, which is not a 'good' ending reason, as logic should have ended it with done-dialect/issue-dialect
     | 'issue-dialect'           // [1] ended because a dispatch encountered an issue, such as out-of-tokens, recitation, etc.
-    | 'issue-rpc';              // [2] ended because of an issue
+    | 'issue-dispatch-rpc';     // [2] ended because of an issue
 
   export type CGIssueId =
     | 'dialect-issue'           // [1] when end reason = 'issue-dialect'
-    | 'dispatch-prepare'        // [2] when end reason = 'issue-rpc', 4 phases of GC dispatch
+    | 'dispatch-prepare'        // [2] when end reason = 'issue-dispatch-rpc', 4 phases of GC dispatch
     | 'dispatch-fetch'          // [2] "
     | 'dispatch-read'           // [2] "
-    | 'dispatch-parse'          // [2] "
-    | 'client-read';            // the aix client encountered an unexpected error (e.g. tRPC)
+    | 'dispatch-parse';         // [2] "
 
   export type GCTokenStopReason =
     | 'ok'                      // clean, including reaching 'stop sequences'
     | 'ok-tool_invocations'     // clean & tool invocations
-    | 'ok-pause_continue'       // clean, but paused (e.g. Anthropic server tools like web search) - requires continuation
     // premature:
     | 'cg-issue'                // [1][2] chat-generation issue (see CGIssueId, mostly a dispatch or dialect issue)
-    | 'client-abort-signal'     // the client aborted - likely a user/auto initiation
     | 'filter-content'          // content filter (e.g. profanity)
     | 'filter-recitation'       // recitation filter (e.g. recitation)
     | 'filter-refusal'          // safety refusal filter (e.g. Anthropic safety concerns)
@@ -711,12 +745,25 @@ export namespace AixWire_Particles {
     // | { p: '_di', i_text: string }
     | { p: 'fci', id: string, name: string, i_args?: string /* never undefined */ }
     | { p: '_fci', _args: string }
-    | { p: 'cei', id: string, language: string, code: string, author: 'gemini_auto_inline' }
-    | { p: 'cer', id: string, error: DMessageToolResponsePart['error'], result: string, executor: 'gemini_auto_inline', environment: DMessageToolResponsePart['environment'] }
+    | { p: 'cei', id: string, language: string, code: string, author: 'gemini_auto_inline' | 'code_interpreter' }
+    | { p: 'cer', id: string, error: DMessageToolResponsePart['error'], result: string, executor: 'gemini_auto_inline' | 'code_interpreter', environment: DMessageToolResponsePart['environment'] }
     | { p: 'ia', mimeType: string, a_b64: string, label?: string, generator?: string, durationMs?: number } // inline audio, complete
-    | { p: 'ii', mimeType: string, i_b64: string, label?: string, generator?: string, prompt?: string } // inline image, complete
+    | { p: 'ii', mimeType: string, i_b64: string, label?: string, generator?: string, prompt?: string, hintSkipResize?: boolean } // inline image, complete
+    /**
+     * Model Operation - tracks instant model's operation(s) state, primarily for hosted tools.
+     * - state is 'active' unless specified otherwise, 'error' is done too
+     * - shall be called 'mos' but for legacy/compatibility it's still 'vp' (backwards comp to simple void placeholder particles)
+     */
+    | { p: /*'mo'*/ 'vp', opId: string, text: string, mot: 'search-web' | 'gen-image' | 'code-exec', state?: 'done' | 'error', parentOpId?: string, iTexts?: string[], oTexts?: string[] }
     | { p: 'urlc', title: string, url: string, num?: number, from?: number, to?: number, text?: string, pubTs?: number } // url citation - pubTs: publication timestamp
-    | { p: 'svs', vendor: string, state: Record<string, unknown> } // set vendor state - applies to the last emitted part (opaque protocol state)
-    | { p: 'vp', text: string, mot: 'search-web' | 'gen-image' | 'code-exec' }; // void placeholder - temporary status text that gets wiped when real content arrives
+    | { p: 'hres' } & ( // hosted resource - provider-hosted resource
+      | { kind: 'vnd.ant.file', fileId: string, containerId?: string }
+      )
+    | { p: 'svs' } & ( // set vendor state - vendor-specific opaque protocol state
+      | { vendor: 'anthropic', state: { container: { id: string; expiresAt: string } } } // message-level
+      | { vendor: 'gemini', state: { thoughtSignature: string } } // fragment-level
+      // | { vendor: string, state: Record<string, unknown> } // disable catch-all becasue it forces casts in type discriminations
+      )
+    ;
 
 }

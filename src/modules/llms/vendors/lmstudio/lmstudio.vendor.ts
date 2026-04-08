@@ -31,7 +31,6 @@ export const ModelVendorLMStudio: IModelVendor<DLMStudioServiceSettings, OpenAIA
     oaiOrg: '',
     oaiHost: partialSetup?.oaiHost || '',
     heliKey: '',
-    moderationCheck: false,
   }),
 
   // OpenAI transport ('lmstudio' dialect in 'access')
@@ -39,6 +38,8 @@ export const ModelVendorLMStudio: IModelVendor<DLMStudioServiceSettings, OpenAIA
 
 };
 
-function _csfLMStudioAvailable(s?: Partial<DLMStudioServiceSettings>) {
-  return !!s?.oaiHost;
+function _csfLMStudioAvailable(_s?: Partial<DLMStudioServiceSettings>) {
+  // always available for local vendors - LM Studio defaults to http://localhost:1234
+  // was: return !!s?.oaiHost;
+  return true;
 }

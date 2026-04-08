@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useQuery } from '@tanstack/react-query';
 
 import { Box, CircularProgress, IconButton, Option, optionClasses, Select, SelectSlotsAndSlotProps } from '@mui/joy';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
@@ -60,13 +61,15 @@ export function SpeexVoiceSelect(props: {
   const [userSelectedVoiceId, setUserSelectedVoiceId] = React.useState<string | null>(null);
 
 
-  // [effect] auto-preview: play voice sample only when user explicitly selects a voice
+  // auto-preview: play voice sample when user selects, cancel on voice switch or unmount
   const selectedVoice = userSelectedVoiceId ? voices.find(v => v.id === userSelectedVoiceId) : null;
   const previewUrl = (autoPreview && selectedVoice?.previewUrl) || null;
-  React.useEffect(() => {
-    if (previewUrl)
-      void AudioPlayer.playUrl(previewUrl);
-  }, [previewUrl]);
+  useQuery({
+    enabled: !!previewUrl,
+    queryKey: ['speex-voice-preview', previewUrl],
+    queryFn: async ({ signal }) =>
+      AudioPlayer.playUrl(previewUrl!, signal),
+  });
 
 
   // handlers
@@ -79,7 +82,7 @@ export function SpeexVoiceSelect(props: {
   return <Box sx={{ display: 'flex', alignItems: 'center' }}>
 
     {refetch && (
-      <TooltipOutlined color={error ? 'danger' : undefined} title={error ? <pre>{error}</pre> : 'Refresh voices'}>
+      <TooltipOutlined color={error ? 'danger' : undefined} title={error ? <div style={{ whiteSpace: 'pre-wrap' }}>{error}</div> : 'Refresh voices'}>
         <IconButton
           color={error ? 'danger' : 'neutral'}
           variant='plain'

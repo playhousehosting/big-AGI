@@ -1,15 +1,15 @@
 import type { Immutable } from '~/common/types/immutable.types';
 import { getImageAsset } from '~/common/stores/blob/dblobs-portability';
 
-import { DLLM, LLM_IF_HOTFIX_NoStream, LLM_IF_HOTFIX_StripImages, LLM_IF_HOTFIX_StripSys0, LLM_IF_HOTFIX_Sys0ToUsr0 } from '~/common/stores/llms/llms.types';
+import { DLLM, LLM_IF_HOTFIX_NoStream, LLM_IF_HOTFIX_NoWebP, LLM_IF_HOTFIX_StripImages, LLM_IF_HOTFIX_StripSys0, LLM_IF_HOTFIX_Sys0ToUsr0 } from '~/common/stores/llms/llms.types';
 import { DMessage, DMessageRole, DMetaReferenceItem, MESSAGE_FLAG_AIX_SKIP, MESSAGE_FLAG_VND_ANT_CACHE_AUTO, MESSAGE_FLAG_VND_ANT_CACHE_USER, messageHasUserFlag } from '~/common/stores/chat/chat.message';
 import { DMessageFragment, DMessageImageRefPart, DMessageZyncAssetReferencePart, isContentOrAttachmentFragment, isToolResponseFunctionCallPart, isVoidThinkingFragment } from '~/common/stores/chat/chat.fragments';
 import { Is } from '~/common/util/pwaUtils';
 import { convert_Base64WithMimeType_To_Blob, convert_Blob_To_Base64 } from '~/common/util/blobUtils';
-import { imageBlobResizeIfNeeded, LLMImageResizeMode } from '~/common/util/imageUtils';
+import { imageBlobConvertType, imageBlobResizeIfNeeded, LLMImageResizeMode } from '~/common/util/imageUtils';
 
 // NOTE: pay particular attention to the "import type", as this is importing from the server-side Zod definitions
-import type { AixAPIChatGenerate_Request, AixMessages_ModelMessage, AixMessages_ToolMessage, AixMessages_UserMessage, AixParts_InlineImagePart, AixParts_MetaCacheControl, AixParts_MetaInReferenceToPart, AixParts_ModelAuxPart } from '../server/api/aix.wiretypes';
+import type { AixAPIChatGenerate_Request, AixMessages_ModelMessage, AixMessages_UserMessage, AixParts_InlineImagePart, AixParts_MetaCacheControl, AixParts_MetaInReferenceToPart, AixParts_ModelAuxPart } from '../server/api/aix.wiretypes';
 
 // TODO: remove console messages to zero, or replace with throws or something
 
@@ -102,6 +102,7 @@ export async function aixCGR_SystemMessage_FromDMessageOrThrow(
           case 'image_ref':
           case 'tool_invocation':
           case 'tool_response':
+          case 'hosted_resource':
           case 'error':
           case '_pt_sentinel':
             console.warn('[DEV] aixCGR_systemMessageFromInstruction: unexpected System Content fragment', { sFragment });
@@ -362,6 +363,7 @@ export async function aixCGR_ChatSequence_FromDMessagesOrThrow(
           case 'error':
           case 'tool_invocation':
           case 'tool_response':
+          case 'hosted_resource':
             console.warn('aixCGR_FromDMessages: unexpected Non-User fragment part type', (uFragment.part as any).pt);
             break;
 
@@ -388,10 +390,7 @@ export async function aixCGR_ChatSequence_FromDMessagesOrThrow(
 
     } else if (dMessageRole === 'assistant') {
 
-      // Note: even tool invocations and responses were interleaved, we will bucket them in 1 model message and 1 tool message
-      // FIXME: assumption that this is the right way of handling it, rather than interleaving many messages
       const modelMessage: AixMessages_ModelMessage = { role: 'model', parts: [] };
-      const toolMessage: AixMessages_ToolMessage = { role: 'tool', parts: [] };
 
       for (const aFragment of m.fragments) {
 
@@ -522,7 +521,19 @@ export async function aixCGR_ChatSequence_FromDMessagesOrThrow(
               if (Array.isArray(resultObject))
                 throw new Error('[AIX validation for Gemini] expecting `tool_response` to not be an array');
             }
-            toolMessage.parts.push(_vnd ? { ...aPart, _vnd } : aPart);
+            modelMessage.parts.push(_vnd ? { ...aPart, _vnd } : aPart);
+            break;
+
+          case 'hosted_resource':
+            // Hosted resources are download-only artifacts - emit a text placeholder for model context
+            // NOTE: disabled for now - we don't know how usefult this hinting it, and we're clashing with proprietary Anthropic prompts
+            // modelMessage.parts.push({
+            //   pt: 'text',
+            //   text: `[Output file: ${aPart.resource.via === 'anthropic' ? aPart.resource.fileId : 'unknown'}]`,
+            //   // ...(aPart.resource.via === 'anthropic' && {
+            //   //   _vnd: { anthropic: { containerUpload: { fileId: aPart.resource.fileId, ...(aPart.resource.containerId && { containerId: aPart.resource.containerId }) } } },
+            //   // }),
+            // });
             break;
 
           default:
@@ -532,18 +543,14 @@ export async function aixCGR_ChatSequence_FromDMessagesOrThrow(
         }
       }
 
-      const assistantMessages: (AixMessages_ModelMessage | AixMessages_ToolMessage)[] = [];
-      if (modelMessage.parts.length > 0)
-        assistantMessages.push(modelMessage);
-      if (toolMessage.parts.length > 0)
-        assistantMessages.push(toolMessage);
+      if (modelMessage.parts.length > 0) {
 
-      // (on Assistant messages) handle the ant-cache-prompt user/auto flags, on the very last message
-      if (mHasAntCacheFlag && assistantMessages.length > 0)
-        assistantMessages[assistantMessages.length - 1].parts.push(_clientCreateAixMetaCacheControlPart('anthropic-ephemeral'));
+        // (on Assistant messages) handle the ant-cache-prompt user/auto flags, on the very last message
+        if (mHasAntCacheFlag)
+          modelMessage.parts.push(_clientCreateAixMetaCacheControlPart('anthropic-ephemeral'));
 
-      // Add the assistant messages to the chatSequence
-      acc.chatSequence.push(...assistantMessages);
+        acc.chatSequence.push(modelMessage);
+      }
 
     } else {
 
@@ -641,10 +648,10 @@ function _clientCreateAixMetaInReferenceToPart(items: DMetaReferenceItem[]): Aix
 /// Client-side hotfixes
 
 
-export function clientHotFixGenerateRequest_ApplyAll(llmInterfaces: DLLM['interfaces'], aixChatGenerate: AixAPIChatGenerate_Request, modelName: string): {
+export async function clientHotFixGenerateRequest_ApplyAll(llmInterfaces: DLLM['interfaces'], aixChatGenerate: AixAPIChatGenerate_Request, modelName: string): Promise<{
   shallDisableStreaming: boolean;
   workaroundsCount: number;
-} {
+}> {
 
   let workaroundsCount = 0;
 
@@ -659,6 +666,10 @@ export function clientHotFixGenerateRequest_ApplyAll(llmInterfaces: DLLM['interf
   // Apply the strip-images hot fix (e.g. o1-preview); however this is a late-stage emergency hotfix as we expect the caller to be aware of this logic
   if (llmInterfaces.includes(LLM_IF_HOTFIX_StripImages))
     workaroundsCount += clientHotFixGenerateRequest_StripImages(aixChatGenerate);
+
+  // Apply the no-webp hot fix - convert WebP images to JPEG (smaller) or PNG (lossless)
+  if (llmInterfaces.includes(LLM_IF_HOTFIX_NoWebP))
+    workaroundsCount += await clientHotFixGenerateRequest_ConvertWebP(aixChatGenerate, 'image/jpeg');
 
   // Disable streaming for select chat models that don't support it (e.g. o1-preview (old) and o1-2024-12-17)
   const shallDisableStreaming = llmInterfaces.includes(LLM_IF_HOTFIX_NoStream);
@@ -698,6 +709,35 @@ function clientHotFixGenerateRequest_StripImages(aixChatGenerate: AixAPIChatGene
   }
 
   // Log the number of workarounds applied
+  return workaroundsCount;
+
+}
+
+/**
+ * Hot fix for models that don't support WebP images - converts to JPEG or PNG
+ */
+async function clientHotFixGenerateRequest_ConvertWebP(aixChatGenerate: AixAPIChatGenerate_Request, toFormat: 'image/jpeg' | 'image/png'): Promise<number> {
+
+  let workaroundsCount = 0;
+  const quality = toFormat === 'image/jpeg' ? 0.92 : 1.0;
+
+  for (const message of aixChatGenerate.chatSequence) {
+    for (let j = 0; j < message.parts.length; j++) {
+      const part = message.parts[j];
+      if (part.pt === 'inline_image' && part.mimeType === 'image/webp') {
+        try {
+          const webpBlob = await convert_Base64WithMimeType_To_Blob(part.base64, 'image/webp', 'hotfix-no-webp');
+          const { blob: convertedBlob } = await imageBlobConvertType(webpBlob, toFormat, quality);
+          const convertedBase64 = await convert_Blob_To_Base64(convertedBlob, 'hotfix-no-webp');
+          message.parts[j] = { pt: 'inline_image', mimeType: toFormat, base64: convertedBase64 };
+          workaroundsCount++;
+        } catch (error) {
+          console.warn('[DEV] clientHotFixGenerateRequest_ConvertWebP: Error converting image:', error);
+        }
+      }
+    }
+  }
+
   return workaroundsCount;
 
 }

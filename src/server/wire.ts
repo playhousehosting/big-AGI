@@ -1,7 +1,11 @@
 import * as z from 'zod/v4';
 
+import { objectDeepCloneWithStringLimit } from '~/common/util/objectUtils';
+
+
 /// set this to true to see the tRPC and fetch requests made by the server
-export const SERVER_DEBUG_WIRE = false; //
+export const SERVER_DEBUG_WIRE = false;
+const SERVER_DEBUG_MAX_BYTES = 8192;
 
 
 export class ServerFetchError extends Error {
@@ -121,7 +125,7 @@ export function debugGenerateCurlCommand(method: 'GET' | 'POST' | 'DELETE' | 'PU
         }
       }
     } else
-      curl += `-d '${JSON.stringify(body)}'`;
+      curl += `-d '${JSON.stringify(objectDeepCloneWithStringLimit(body, 'debug-curl-body', 4096))}'`;
   }
 
   return curl;
@@ -159,26 +163,46 @@ export function abortableDelay(delayMs: number, abortSignal: AbortSignal): Promi
 
 
 /**
- * Small debugging utility to log train of events, used on the server-side
- * for incoming packets (e.g. SSE).
+ * Debugging utility for logging network I/O with sequence tracking and timing.
+ * Used for both server-side and client-side (via CSF) wire debugging.
+ *
+ * Usage:
+ *  - Server: const wire = createDebugWireLogger('AIX', SERVER_DEBUG_WIRE);
+ *  - Client: const wire = null; // explicitly disabled
+ *  - Access: wire?.logRequest(...); wire?.logResponse(...);
  */
-export class ServerDebugWireEvents {
+export class DebugWireLogger {
   private sequenceNumber: number = 0;
   private lastMs: number | null = null;
-  private distinct: string = Date.now().toString(36).slice(-3);
+  private readonly distinct: string = Date.now().toString(36).slice(-4);
 
-  onMessage(message: any) {
-    this.sequenceNumber++;
-    if (SERVER_DEBUG_WIRE) {
-      const nowMs = Date.now();
-      const elapsedMs = this.lastMs ? nowMs - this.lastMs : 0;
-      this.lastMs = nowMs;
-      console.log(`<- SSE (${this.distinct}, ${this.sequenceNumber}, ${elapsedMs} ms):`, message);
-    }
+  constructor(private readonly label: string) {}
+
+  logRequest(method: 'GET' | 'POST' | 'DELETE' | 'PUT', url: string, headers?: HeadersInit, body?: object) {
+    console.log(`\n[${this.label}:${this.distinct}] ->`, debugGenerateCurlCommand(method, url, headers, body));
   }
+
+  logResponse(data: any) {
+    this.sequenceNumber++;
+    const nowMs = Date.now();
+    const elapsedMs = this.lastMs ? nowMs - this.lastMs : 0;
+    this.lastMs = nowMs;
+
+    // deep clone the object with a per-string-field limit, and remove the type: 'event' field if present
+    const obectClone = objectDeepCloneWithStringLimit(data, `${this.label}.wire-debug`, SERVER_DEBUG_MAX_BYTES);
+    if (obectClone && typeof obectClone === 'object' && 'type' in obectClone && obectClone.type === 'event')
+      delete (obectClone as any).type;
+
+    console.log(
+      `\n[${this.label}:${this.distinct}] <- #${this.sequenceNumber} (${elapsedMs} ms):`,
+      obectClone,
+      // JSON.stringify(objectDeepCloneWithStringLimit(data, `${this.label}.wire-debug`, 8192), null, 2),
+    );
+  }
+
 }
 
-export const createServerDebugWireEvents = () => SERVER_DEBUG_WIRE ? new ServerDebugWireEvents() : null;
+export const createDebugWireLogger = (label: string) => SERVER_DEBUG_WIRE ? new DebugWireLogger(label) : null;
 
 
 /** Utility to escape XML, for example to avoid XSS attacks. */

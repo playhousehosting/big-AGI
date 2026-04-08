@@ -1,17 +1,17 @@
 import * as z from 'zod/v4';
 
 import { createTRPCRouter, edgeProcedure } from '~/server/trpc/trpc.server';
-import { fetchJsonOrTRPCThrow } from '~/server/trpc/trpc.router.fetchers';
+import { fetchJsonOrTRPCThrow, fetchResponseOrTRPCThrow, fetchTextOrTRPCThrow } from '~/server/trpc/trpc.router.fetchers';
 
 import { ListModelsResponse_schema } from '../llm.server.types';
 import { listModelsRunDispatch } from '../listModels.dispatch';
 
-import { anthropicAccess, anthropicAccessSchema, AnthropicAccessSchema, AnthropicHeaderOptions } from './anthropic.access';
+import { anthropicAccess, anthropicAccessSchema, AnthropicAccessSchema, AnthropicHostedFeatures, ANTHROPIC_API_PATHS } from './anthropic.access';
 
 
 // Mappers
 
-async function anthropicGETOrThrow<TOut extends object>(access: AnthropicAccessSchema, apiPath: string, options?: AnthropicHeaderOptions, signal?: AbortSignal): Promise<TOut> {
+async function anthropicGETOrThrow<TOut extends object>(access: AnthropicAccessSchema, apiPath: string, options?: AnthropicHostedFeatures, signal?: AbortSignal): Promise<TOut> {
   const { headers, url } = anthropicAccess(access, apiPath, options);
   return await fetchJsonOrTRPCThrow<TOut>({ url, headers, name: 'Anthropic', signal });
 }
@@ -43,7 +43,7 @@ export const llmAnthropicRouter = createTRPCRouter({
   listSkills: edgeProcedure
     .input(z.object({ access: anthropicAccessSchema }))
     .query(async ({ input: { access } }) => {
-      return await anthropicGETOrThrow(access, '/v1/skills', { enableSkills: true });
+      return await anthropicGETOrThrow(access, ANTHROPIC_API_PATHS.skills, { enableSkills: true });
     }),
 
   /* [Anthropic] get skill details */
@@ -53,28 +53,64 @@ export const llmAnthropicRouter = createTRPCRouter({
       skillId: z.string(),
     }))
     .query(async ({ input: { access, skillId } }) => {
-      return await anthropicGETOrThrow(access, `/v1/skills/${skillId}`, { enableSkills: true });
+      return await anthropicGETOrThrow(access, `${ANTHROPIC_API_PATHS.skills}/${skillId}`, { enableSkills: true });
     }),
 
-  /* [Anthropic] get file metadata - for Skills-generated files */
-  getFileMetadata: edgeProcedure
+  /* [Anthropic] Files API - delete file permanently from Anthropic servers */
+  fileApiDelete: edgeProcedure
+    .input(z.object({
+      access: anthropicAccessSchema,
+      fileId: z.string(),
+    }))
+    .mutation(async ({ input: { access, fileId } }) => {
+      const { headers, url } = anthropicAccess(access, `${ANTHROPIC_API_PATHS.files}/${fileId}`, { enableSkills: true, enableCodeExecution: true });
+      await fetchTextOrTRPCThrow({ url, headers, method: 'DELETE', name: 'Anthropic' });
+      return { success: true };
+    }),
+
+  /* [Anthropic] Files API - download file content */
+  fileApiDownload: edgeProcedure
     .input(z.object({
       access: anthropicAccessSchema,
       fileId: z.string(),
     }))
     .query(async ({ input: { access, fileId } }) => {
-      return await anthropicGETOrThrow(access, `/v1/files/${fileId}`, { enableSkills: true });
+      const { headers, url } = anthropicAccess(access, `${ANTHROPIC_API_PATHS.files}/${fileId}/content`, { enableSkills: true, enableCodeExecution: true });
+      const response = await fetchResponseOrTRPCThrow({ url, headers, name: 'Anthropic' });
+
+      // Guard against excessively large files (10 MB limit)
+      const MAX_FILE_BYTES = 10 * 1024 * 1024;
+      const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
+      if (contentLength > MAX_FILE_BYTES)
+        throw new Error(`File too large to download (${(contentLength / 1024 / 1024).toFixed(1)} MB, limit ${MAX_FILE_BYTES / 1024 / 1024} MB)`);
+
+      const arrayBuffer = await response.arrayBuffer();
+      if (arrayBuffer.byteLength > MAX_FILE_BYTES)
+        throw new Error(`File too large to download (${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)} MB, limit ${MAX_FILE_BYTES / 1024 / 1024} MB)`);
+
+      return {
+        base64Data: Buffer.from(arrayBuffer).toString('base64'),
+        mimeType: response.headers.get('content-type') || 'application/octet-stream',
+      };
     }),
 
-  /* [Anthropic] download file - for Skills-generated files */
-  downloadFile: edgeProcedure
+  /* [Anthropic] Files API - get file metadata */
+  fileApiGetMetadata: edgeProcedure
     .input(z.object({
       access: anthropicAccessSchema,
       fileId: z.string(),
     }))
+    .output(z.object({
+      id: z.string(),
+      type: z.literal('file'),
+      filename: z.string(),
+      mime_type: z.string(),
+      size_bytes: z.number(),
+      created_at: z.string(),
+      downloadable: z.boolean().optional(),
+    }))
     .query(async ({ input: { access, fileId } }) => {
-      // Return file data - could be integrated with ZYNC Assets in the future
-      return await anthropicGETOrThrow(access, `/v1/files/${fileId}/download`, { enableSkills: true });
+      return await anthropicGETOrThrow(access, `${ANTHROPIC_API_PATHS.files}/${fileId}`, { enableSkills: true, enableCodeExecution: true });
     }),
 
 });

@@ -22,15 +22,15 @@ import { AudioPlayer } from '~/common/util/audio/AudioPlayer';
 import { Link } from '~/common/components/Link';
 import { OptimaPanelGroupedList } from '~/common/layout/optima/panel/OptimaPanelGroupedList';
 import { OptimaPanelIn, OptimaToolbarIn } from '~/common/layout/optima/portals/OptimaPortalsIn';
-import { PhVoice } from '~/common/components/icons/phosphor/PhVoice';
 import { SpeechResult, useSpeechRecognition } from '~/common/components/speechrecognition/useSpeechRecognition';
+import { clipboardInterceptCtrlCForCleanup } from '~/common/util/clipboardUtils';
 import { conversationTitle, remapMessagesSysToUsr } from '~/common/stores/chat/chat.conversation';
 import { createDMessageFromFragments, createDMessageTextContent, DMessage, messageFragmentsReduceText, messageWasInterruptedAtStart } from '~/common/stores/chat/chat.message';
 import { createErrorContentFragment } from '~/common/stores/chat/chat.fragments';
 import { launchAppChat, navigateToIndex } from '~/common/app.routes';
 import { useChatStore } from '~/common/stores/chat/store-chats';
 import { useGlobalShortcuts } from '~/common/components/shortcuts/useGlobalShortcuts';
-import { usePlayUrl } from '~/common/util/audio/usePlayUrl';
+import { usePlayUrlInterval } from './state/usePlayUrlInterval';
 
 import type { AppCallIntent } from './AppCall';
 import { CallAvatar } from './components/CallAvatar';
@@ -127,11 +127,11 @@ export function Telephone(props: {
 
   // pickup / hangup
   React.useEffect(() => {
-    !isRinging && AudioPlayer.playUrl(isConnected ? '/sounds/chat-begin.mp3' : '/sounds/chat-end.mp3');
+    !isRinging && void AudioPlayer.playUrl(isConnected ? '/sounds/chat-begin.mp3' : '/sounds/chat-end.mp3').catch(() => {/* autoplay may be blocked */});
   }, [isRinging, isConnected]);
 
   // ringtone
-  usePlayUrl(isRinging ? '/sounds/chat-ringtone.mp3' : null, 300, 2800 * 2);
+  usePlayUrlInterval(isRinging ? '/sounds/chat-ringtone.mp3' : null, 300, 2800 * 2);
 
 
   /// Shortcuts
@@ -250,13 +250,13 @@ export function Telephone(props: {
       if (messageWasInterruptedAtStart(status.lastDMessage))
         return;
 
-      // whether status.outcome === 'success' or not, we get a valid DMessage, eventually with Error Fragments inside
+      // whether status.outcome === 'completed' or not, we get a valid DMessage, eventually with Error Fragments inside
       const fullMessage = createDMessageFromFragments('assistant', status.lastDMessage.fragments);
       fullMessage.generator = status.lastDMessage.generator;
       setCallMessages(messages => [...messages, fullMessage]); // [state] append assistant:call_response
 
       // fire/forget - use 'fast' priority for real-time conversation
-      if (status.outcome === 'success' && finalText?.length >= 1)
+      if (status.outcome === 'completed' && finalText?.length >= 1)
         void speakText(finalText,
           undefined,
           { label: 'Call', priority: 'fast' },
@@ -360,7 +360,7 @@ export function Telephone(props: {
 
         <ScrollToBottom stickToBottomInitial>
 
-          <Box sx={{ minHeight: '100%', p: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <Box onCopy={clipboardInterceptCtrlCForCleanup} sx={{ minHeight: '100%', p: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
 
             {/* Call Messages [] */}
             {callMessages.map((message) =>
